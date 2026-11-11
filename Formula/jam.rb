@@ -2,7 +2,7 @@
 #
 # Installation (HEAD-only until the first tagged release):
 #
-#   brew tap raphamorim/jam https://github.com/raphamorim/jam
+#   brew tap tri-berry/jam https://github.com/tri-berry/jam
 #   brew install --HEAD jam
 #
 # Once a release is cut, add a `stable do ... end` block with the
@@ -10,9 +10,9 @@
 
 class Jam < Formula
   desc "Jam programming language"
-  homepage "https://github.com/raphamorim/jam"
+  homepage "https://github.com/tri-berry/jam"
   license "Apache-2.0" => { with: "LLVM-exception" }
-  head "https://github.com/raphamorim/jam.git", branch: "main"
+  head "https://github.com/tri-berry/jam.git", branch: "main"
 
   depends_on "rust" => :build
   depends_on "llvm@22"

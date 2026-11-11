@@ -18,13 +18,13 @@ Jam will move to an org in the future, but right now it's mostly me maintaining 
 In case you want to test before v0.1:
 
 ```bash
-brew tap raphamorim/jam https://github.com/raphamorim/jam
+brew tap tri-berry/jam https://github.com/tri-berry/jam
 brew install --HEAD jam
 ```
 
 ## Building from source
 
-The compiler is written in Rust (it started as C++; the last commit carrying that implementation is [`4e66bc6`](https://github.com/raphamorim/jam/tree/4e66bc6)). You need the Rust toolchain (1.96, picked up automatically via `rust-toolchain.toml`) and LLVM 22 — `brew install llvm`, or point `LLVM_CONFIG` at your `llvm-config`.
+The compiler is written in Rust (it started as C++; the last commit carrying that implementation is [`4e66bc6`](https://github.com/tri-berry/jam/tree/4e66bc6)). You need the Rust toolchain (1.96, picked up automatically via `rust-toolchain.toml`) and LLVM 22 — `brew install llvm`, or point `LLVM_CONFIG` at your `llvm-config`.
 
 ```bash
 make build     # debug build (cargo build -p jam)

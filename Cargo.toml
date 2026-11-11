@@ -16,9 +16,9 @@ edition = "2024"
 license = "Apache-2.0 WITH LLVM-exception"
 keywords = ["compiler"]
 rust-version = "1.99.0"
-repository = "https://github.com/raphamorim/jam"
+repository = "https://github.com/tri-berry/jam"
 homepage = "https://jamlang.org"
-documentation = "https://github.com/raphamorim/jam#readme"
+documentation = "https://github.com/tri-berry/jam#readme"
 readme = "README.md"
 
 [workspace.dependencies]
