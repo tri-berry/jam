@@ -21,13 +21,13 @@ and issues and pull requests on the repository stay closed until then.
         <div class="card-title">Homebrew formula</div>
         <div class="card-sub">Builds the compiler from <code>main</code></div>
     </div>
-    <a class="button" href="https://github.com/raphamorim/jam">GitHub</a>
+    <a class="button" href="https://github.com/tri-berry/jam">GitHub</a>
 </div>
 
 The formula builds the latest commit on `main` and pulls in LLVM 22 and Rust for you.
 
 ```bash
-brew tap raphamorim/jam https://github.com/raphamorim/jam
+brew tap tri-berry/jam https://github.com/tri-berry/jam
 brew install --HEAD jam
 ```
 
@@ -38,7 +38,7 @@ The compiler is written in Rust. You need the toolchain from `rust-toolchain.tom
 `LLVM_CONFIG` pointing at your `llvm-config`.
 
 ```bash
-git clone https://github.com/raphamorim/jam
+git clone https://github.com/tri-berry/jam
 cd jam
 make build     # debug build
 make test      # Rust unit tests + the .jam corpus under tests/
