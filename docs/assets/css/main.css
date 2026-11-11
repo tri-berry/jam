@@ -26,7 +26,7 @@ body {
     background: var(--bg);
     color: var(--text-body);
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    font-size: 17px;
+    font-size: 16px;
     line-height: 1.65;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -194,25 +194,25 @@ code, pre, kbd { font-family: var(--mono); }
     scroll-margin-top: 2rem;
 }
 .content h1 {
-    font-size: 2.6rem;
+    font-size: 2.25rem;
     line-height: 1.15;
     margin: 0 0 1.75rem;
 }
 .content h2 {
-    font-size: 1.75rem;
+    font-size: 1.5rem;
     line-height: 1.25;
     margin: 4rem 0 1.25rem;
 }
 .content h3 {
-    font-size: 1.25rem;
+    font-size: 1.125rem;
     margin: 2.5rem 0 1rem;
 }
-.content h4 { font-size: 1rem; margin: 2rem 0 0.75rem; }
+.content h4 { font-size: 0.9375rem; margin: 2rem 0 0.75rem; }
 
 .content p { margin: 0 0 1.4rem; }
 .content p.lead {
     color: var(--text);
-    font-size: 1.15rem;
+    font-size: 1.0625rem;
 }
 .content strong { color: var(--text); font-weight: 500; }
 
@@ -315,7 +315,7 @@ code, pre, kbd { font-family: var(--mono); }
     flex: none;
 }
 .card-text { flex: 1; min-width: 0; line-height: 1.4; }
-.card-title { color: var(--text); font-size: 1.15rem; }
+.card-title { color: var(--text); font-size: 1.0625rem; }
 .card-sub { color: var(--text-muted); }
 .content a.button {
     flex: none;
@@ -453,8 +453,8 @@ code, pre, kbd { font-family: var(--mono); }
         margin: 0;
         padding: 2.5rem 1rem 4rem;
     }
-    .content h1 { font-size: 2.1rem; }
-    .content h2 { font-size: 1.5rem; margin-top: 3rem; scroll-margin-top: 5.5rem; }
+    .content h1 { font-size: 1.9rem; }
+    .content h2 { font-size: 1.35rem; margin-top: 3rem; scroll-margin-top: 5.5rem; }
     .content h3 { scroll-margin-top: 5.5rem; }
 
     .intro { flex-direction: column; align-items: flex-start; gap: 1.25rem; }
