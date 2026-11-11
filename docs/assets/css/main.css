@@ -55,6 +55,7 @@ code, pre, kbd { font-family: var(--mono); }
     width: var(--sidebar-w);
     padding: 3rem 3.5rem 2rem 2rem;
     overflow-y: auto;
+    font-size: 0.875rem;
     scrollbar-width: thin;
     scrollbar-color: #283135 transparent;
 }
@@ -94,7 +95,6 @@ code, pre, kbd { font-family: var(--mono); }
     outline: 0;
     color: var(--text);
     font: inherit;
-    font-size: 1rem;
 }
 .search input::placeholder { color: var(--text-muted); }
 .search input::-webkit-search-cancel-button { display: none; }
@@ -108,7 +108,7 @@ code, pre, kbd { font-family: var(--mono); }
 .nav-group + .nav-group { margin-top: 2rem; }
 .nav-group h5 {
     margin: 0 0 0.75rem;
-    font-size: 1rem;
+    font-size: 1em;
     font-weight: 400;
     color: var(--text-muted);
 }
@@ -133,7 +133,7 @@ code, pre, kbd { font-family: var(--mono); }
     gap: 1rem;
     margin-top: 3rem;
     padding-left: 0.5rem;
-    font-size: 0.875rem;
+    font-size: 0.8125rem;
     color: var(--text-muted);
 }
 .sidebar-foot a { text-decoration: none; }
