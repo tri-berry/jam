@@ -31,3 +31,6 @@ docs/.jekyll-metadata
 docs/Gemfile.lock
 docs/vendor/
 docs/.bundle/
+
+# macOS
+.DS_Store
