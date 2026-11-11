@@ -3,29 +3,110 @@
 <head>
     {% include head.html %}
 </head>
-<body class="bg-[#fffdfd] text-slate-800 antialiased selection:bg-pink-200">
-    {{ content }}
-    <script>
-        lucide.createIcons();
+<body>
+    <header class="topbar">
+        <a href="{{ '/' | relative_url }}" class="topbar-logo"><img src="{{ '/assets/images/logo.png' | relative_url }}" alt="Jam"></a>
+        <button type="button" class="topbar-menu" data-nav-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+    </header>
 
-        // Mobile nav toggle — slides the #nav-mobile panel open/closed
-        // and swaps the hamburger icon for an X. Queries the button's
-        // two icon children directly (works whether lucide has already
-        // swapped <i> for <svg> or not).
+    <div class="shell">
+        {% include sidebar.html %}
+
+        <main class="content">
+            {{ content }}
+
+            <footer class="content-foot">
+                &copy; {{ 'now' | date: "%Y" }} Raphael Amorim
+            </footer>
+        </main>
+    </div>
+
+    <!-- Prism syntax highlighting for `language-jam` code blocks.
+         The jam language definition lives in /assets/js/jam-prism.js;
+         keywords/operators mirror tree-sitter-jam's highlights.scm. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="{{ '/assets/js/jam-prism.js' | relative_url }}"></script>
+    <script>
+        Prism.highlightAll();
+
+        // Mobile: the sidebar becomes a drawer under the top bar.
         (function () {
             const btn = document.querySelector('[data-nav-toggle]');
-            const menu = document.getElementById('nav-mobile');
-            if (!btn || !menu) return;
-            const icons = btn.querySelectorAll('svg, i');
+            const sidebar = document.getElementById('sidebar');
             btn.addEventListener('click', function () {
-                const isOpen = !menu.classList.contains('hidden');
-                menu.classList.toggle('hidden');
-                icons.forEach(function (icon) { icon.classList.toggle('hidden'); });
-                btn.setAttribute('aria-expanded', String(!isOpen));
-                btn.setAttribute('aria-label', isOpen ? 'Open menu' : 'Close menu');
+                const open = document.body.classList.toggle('nav-open');
+                btn.setAttribute('aria-expanded', String(open));
+                btn.setAttribute('aria-label', open ? 'Close menu' : 'Open menu');
+            });
+            sidebar.addEventListener('click', function (e) {
+                if (e.target.closest('a')) document.body.classList.remove('nav-open');
             });
         })();
-        {% if page.scripts %}{{ page.scripts }}{% endif %}
+
+        // Search filters the sidebar; ⌘K / Ctrl+K focuses it, Enter
+        // follows the first match, Escape clears.
+        (function () {
+            const input = document.getElementById('search');
+            const groups = document.querySelectorAll('.nav-group');
+            const topbar = document.querySelector('.topbar');
+            function filter() {
+                const q = input.value.trim().toLowerCase();
+                groups.forEach(function (group) {
+                    let any = false;
+                    group.querySelectorAll('li').forEach(function (li) {
+                        const hit = !q || li.textContent.toLowerCase().includes(q);
+                        li.hidden = !hit;
+                        any = any || hit;
+                    });
+                    group.hidden = !any;
+                });
+            }
+            input.addEventListener('input', filter);
+            input.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') {
+                    const first = document.querySelector('.sidebar-nav li:not([hidden]) a');
+                    if (first) first.click();
+                } else if (e.key === 'Escape') {
+                    input.value = '';
+                    filter();
+                    input.blur();
+                }
+            });
+            document.addEventListener('keydown', function (e) {
+                if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+                    e.preventDefault();
+                    if (getComputedStyle(topbar).display !== 'none') document.body.classList.add('nav-open');
+                    input.focus();
+                    input.select();
+                }
+            });
+        })();
+
+        // Highlight the section currently in view.
+        (function () {
+            const links = {};
+            document.querySelectorAll('.sidebar-nav a').forEach(function (a) {
+                const url = new URL(a.href);
+                if (url.pathname === location.pathname && url.hash) links[url.hash.slice(1)] = a;
+            });
+            const headings = Array.from(document.querySelectorAll('.content h2[id]')).filter(function (h) { return links[h.id]; });
+            if (!headings.length) return;
+            let current = null;
+            function update() {
+                let id = null;
+                for (const h of headings) {
+                    if (h.getBoundingClientRect().top < 140) id = h.id; else break;
+                }
+                if (id === current) return;
+                if (current) links[current].classList.remove('active');
+                if (id) links[id].classList.add('active');
+                current = id;
+            }
+            document.addEventListener('scroll', update, { passive: true });
+            update();
+        })();
     </script>
 </body>
 </html>
