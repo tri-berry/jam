@@ -1,0 +1,13 @@
+// A drop that can't be compiled for an instantiation is fine when no value
+// of that instance is ever dropped (here the type is only measured).
+const S = struct { a: i64 };
+fn H(T: type) type {
+    return struct {
+        v: T,
+        cfn drop(self: mut Self) { self.v.release(); }
+    };
+}
+
+tfn typeOnlyUseDoesNotNeedTheDrop() {
+    assert(@sizeOf(H(S)) as i64, 8);
+}

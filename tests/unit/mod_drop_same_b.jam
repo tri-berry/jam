@@ -1,0 +1,5 @@
+// See mod_drop_same_a.jam.
+pub const A = struct { sink: *mut i64 };
+cfn drop(self: mut A) { var p: *mut i64 = self.sink; p.* = p.* + 10; }
+pub fn make(s: *mut i64) { var t: A = A { sink: s }; }
+tfn same() { var x: i64 = 2; }

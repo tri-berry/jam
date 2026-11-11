@@ -1,0 +1,8 @@
+// Helper for test_module_types_keep_their_glue.jam: a module `A` with a drop
+// and a top-level clone, and a constructor, while the test file has its own
+// drop-less `A`.
+pub const A = struct { sink: *mut i64, n: i64 };
+cfn drop(self: mut A) { var p: *mut i64 = self.sink; p.* = p.* + 1; }
+cfn clone(self: A) A { return A { sink: self.sink, n: self.n + 10 }; }
+pub fn mk(s: *mut i64, n: i64) A { return A { sink: s, n: n }; }
+pub fn cloned(s: *mut i64) i64 { var x = A { sink: s, n: 1 }; var y = x.clone(); return y.n; }

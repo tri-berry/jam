@@ -1,0 +1,83 @@
+// Moving or returning a binding that shadows an outer one of the same name
+// moves only the inner one: the outer one is still dropped exactly once.
+
+const C = struct { sink: *mut u32 };
+cfn drop(self: mut C) { var p: *mut u32 = self.sink; p.* = p.* + 1; }
+fn consume(c: move C) {}
+
+fn moveInner(a: *mut u32, b: *mut u32) {
+    var c = C { sink: a };
+    if (true) {
+        var c = C { sink: b };
+        consume(c);
+    }
+}
+
+fn returnInner(a: *mut u32, b: *mut u32) C {
+    var c = C { sink: a };
+    if (true) {
+        var c = C { sink: b };
+        return c;
+    }
+    return C { sink: b };
+}
+
+fn keep(a: *mut u32, b: *mut u32) { var r = returnInner(a, b); }
+
+tfn movingTheInnerBindingKeepsTheOuterDrop() {
+    var a: u32 = 0;
+    var b: u32 = 0;
+    moveInner(&a, &b);
+    assert(a, 1);
+    assert(b, 1);
+}
+
+tfn returningTheInnerBindingKeepsTheOuterDrop() {
+    var a: u32 = 0;
+    var b: u32 = 0;
+    keep(&a, &b);
+    assert(a, 1);
+    assert(b, 1);
+}
+
+fn shadowWithPlain(a: *mut u32) u32 {
+    var c = C { sink: a };
+    if (true) {
+        var c: u32 = 7;
+        var y = c;
+        return c;
+    }
+    return 0;
+}
+
+tfn plainShadowDoesntCancelTheOuterDrop() {
+    var a: u32 = 0;
+    assert(shadowWithPlain(&a), 7);
+    assert(a, 1);
+}
+
+fn rebindOuter(a: *mut u32) {
+    var c = C { sink: a };
+    if (true) {
+        var c = c;
+    }
+}
+
+tfn rebindingTheOuterNameMovesItOnce() {
+    var a: u32 = 0;
+    rebindOuter(&a);
+    assert(a, 1);
+}
+
+fn declaredShadowReadsOuter() i64 {
+    var y: i64 = 5;
+    if (true) {
+        var y: i64 = y + 1;
+        return y;
+    }
+    return 0;
+}
+
+tfn declaredShadowInitReadsTheOuterBinding() {
+    assert(declaredShadowReadsOuter(), 6);
+}

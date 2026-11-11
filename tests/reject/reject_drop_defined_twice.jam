@@ -1,0 +1,11 @@
+// A type gets one drop: an in-struct `cfn drop` and a free one for the same
+// type were merged into one function (both bodies running).
+// expect-error: symbol `A.drop` is defined twice
+
+const A = struct {
+    v: i64,
+    cfn drop(self: mut A) { var x: i64 = 1; }
+};
+cfn drop(self: mut A) { var y: i64 = 2; }
+
+fn main() {}

@@ -1,0 +1,27 @@
+// A module's drop and clone stay with its own type: this file's drop-less
+// `A` gets no drop (it used to run the module's and crash), the module's
+// top-level clone is found, and a destructured type and fn come from the
+// module they were destructured from, not another module with an `A`.
+const a = import("mod_owned_a");
+const { A, mk } = import("mod_owned_b");
+
+
+fn useOwn() i64 {
+    var t: A = mk(3);
+    return t.w;
+}
+
+tfn moduleDropDoesNotLeakToSameNamedType() {
+    var hits: i64 = 0;
+    if (true) { var x = a.mk(&hits, 1); }
+    assert(hits, 1);
+}
+
+tfn moduleTopLevelCloneIsFound() {
+    var hits: i64 = 0;
+    assert(a.cloned(&hits), 11);
+}
+
+tfn destructuredTypeAndFnComeFromTheirModule() {
+    assert(useOwn(), 6);
+}

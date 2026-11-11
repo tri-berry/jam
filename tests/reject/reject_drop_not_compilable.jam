@@ -1,0 +1,15 @@
+// A drop that can't be compiled for an instantiation is a compile error
+// where a value is dropped (drop glue calls it implicitly; it used to crash
+// the compiler).
+// expect-error: it calls `G__i64.drop`, which is not available for this instantiation (this drop can't be compiled for the instantiation
+
+fn G(T: type) type {
+    return struct {
+        v: T,
+        cfn drop(self: mut Self) { var r: i64 = self.v.nope(); }
+    };
+}
+
+fn main() {
+    var g = G(i64) { v: 3 };
+}

@@ -1,0 +1,21 @@
+// Two modules' own `A`s with free `cfn drop`s, and this file's `A` with an
+// in-struct drop, each run their own drop (the free drops used to share a
+// symbol, merging their bodies). The helper modules also each have a
+// `tfn same`, which must not clash.
+const a = import("mod_drop_same_a");
+const b = import("mod_drop_same_b");
+
+const A = struct {
+    sink: *mut i64,
+    cfn drop(self: mut A) { var p: *mut i64 = self.sink; p.* = p.* + 100; }
+};
+
+fn makeOwn(s: *mut i64) { var t: A = A { sink: s }; }
+
+tfn eachTypeRunsItsOwnDrop() {
+    var hits: i64 = 0;
+    a.make(&hits);
+    b.make(&hits);
+    makeOwn(&hits);
+    assert(hits, 111);
+}
