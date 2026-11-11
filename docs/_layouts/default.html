@@ -34,6 +34,26 @@
         </main>
     </div>
 
+    <!-- Search palette: every page and section title, filtered as you type. -->
+    <div class="palette" id="palette" hidden>
+        <div class="palette-panel" role="dialog" aria-modal="true" aria-label="Search">
+            <label class="palette-field">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                <input type="search" id="search" placeholder="Search pages and sections" autocomplete="off" spellcheck="false" aria-controls="palette-results">
+            </label>
+            <ul class="palette-results" id="palette-results">
+                {% for group in site.data.nav %}{% for item in group.items %}
+                <li><a href="{{ item.url | relative_url }}" tabindex="-1"><span>{{ item.name }}</span><small>{{ group.title }}</small></a></li>
+                {% for section in item.sections %}
+                <li data-section><a href="{{ item.url | relative_url }}#{{ section.id }}" tabindex="-1"><span>{{ section.name }}</span><small>{{ item.name }}</small></a></li>
+                {% endfor %}
+                {% endfor %}{% endfor %}
+            </ul>
+            <p class="palette-empty" hidden>No page or section matches.</p>
+            <div class="palette-foot"><span>↑↓ to move</span><span>Enter to open</span><span>Esc to close</span></div>
+        </div>
+    </div>
+
     <!-- Prism syntax highlighting for `language-jam` code blocks.
          The jam language definition lives in /assets/js/jam-prism.js;
          keywords/operators mirror tree-sitter-jam's highlights.scm. -->
@@ -56,54 +76,92 @@
             });
         })();
 
-        // Search filters the sidebar; ⌘K / Ctrl+K focuses it, Enter
-        // follows the first match, Escape clears.
+        // Search: the round button beside the mascot (or ⌘K / Ctrl+K)
+        // opens a palette listing pages, then pages and sections that
+        // match what you type. Arrows move, Enter opens, Escape closes.
         (function () {
+            const palette = document.getElementById('palette');
             const input = document.getElementById('search');
-            const sidebar = document.getElementById('sidebar');
-            const groups = document.querySelectorAll('.nav-group');
-            const topbar = document.querySelector('.topbar');
-            function matches(el, q) { return el.textContent.toLowerCase().includes(q); }
-            // While searching, every page's sections are searchable, not
-            // just the current page's.
+            const empty = palette.querySelector('.palette-empty');
+            const rows = Array.from(palette.querySelectorAll('.palette-results li')).map(function (li) {
+                const label = li.querySelector('span');
+                return { li: li, link: li.querySelector('a'), label: label, text: label.textContent, section: li.hasAttribute('data-section') };
+            });
+            let visible = [];
+            let selected = 0;
+            let opener = null;
+
+            function select(i) {
+                selected = i;
+                visible.forEach(function (row, n) { row.link.classList.toggle('sel', n === i); });
+                if (visible[i]) visible[i].li.scrollIntoView({ block: 'nearest' });
+            }
             function filter() {
                 const q = input.value.trim().toLowerCase();
-                sidebar.classList.toggle('searching', q !== '');
-                groups.forEach(function (group) {
-                    let any = false;
-                    group.querySelectorAll('.nav-page').forEach(function (page) {
-                        let hit = !q || matches(page.querySelector('a'), q);
-                        page.querySelectorAll('.nav-tree li').forEach(function (li) {
-                            const sub = !q || matches(li, q);
-                            li.hidden = !sub;
-                            hit = hit || sub;
-                        });
-                        page.hidden = !hit;
-                        any = any || hit;
-                    });
-                    group.hidden = !any;
+                visible = [];
+                rows.forEach(function (row) {
+                    const at = q ? row.text.toLowerCase().indexOf(q) : -1;
+                    const show = q ? at !== -1 : !row.section;
+                    row.li.hidden = !show;
+                    row.label.textContent = '';
+                    if (at === -1) {
+                        row.label.textContent = row.text;
+                    } else {
+                        const mark = document.createElement('mark');
+                        mark.textContent = row.text.slice(at, at + q.length);
+                        row.label.append(row.text.slice(0, at), mark, row.text.slice(at + q.length));
+                    }
+                    if (show) visible.push(row);
                 });
+                empty.hidden = visible.length > 0;
+                select(0);
             }
+            function open() {
+                if (!palette.hidden) return;
+                opener = document.activeElement;
+                document.body.classList.remove('nav-open');
+                document.body.classList.add('palette-open');
+                palette.hidden = false;
+                input.value = '';
+                filter();
+                input.focus();
+            }
+            function close() {
+                if (palette.hidden) return;
+                palette.hidden = true;
+                document.body.classList.remove('palette-open');
+                if (opener && opener.focus) opener.focus();
+            }
+
+            document.querySelectorAll('[data-search-open]').forEach(function (btn) {
+                btn.addEventListener('click', open);
+            });
             input.addEventListener('input', filter);
             input.addEventListener('keydown', function (e) {
-                if (e.key === 'Enter') {
-                    const q = input.value.trim().toLowerCase();
-                    const first = Array.from(document.querySelectorAll('.sidebar-nav li a')).find(function (a) {
-                        return !a.closest('li[hidden]') && (!q || matches(a, q));
-                    });
-                    if (first) first.click();
-                } else if (e.key === 'Escape') {
-                    input.value = '';
-                    filter();
-                    input.blur();
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (visible.length) select((selected + (e.key === 'ArrowDown' ? 1 : -1) + visible.length) % visible.length);
+                } else if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (visible[selected]) visible[selected].link.click();
+                } else if (e.key === 'Tab') {
+                    e.preventDefault();
                 }
             });
+            rows.forEach(function (row) {
+                row.link.addEventListener('mousemove', function () {
+                    const i = visible.indexOf(row);
+                    if (i !== -1 && i !== selected) select(i);
+                });
+                row.link.addEventListener('click', function () { opener = null; close(); });
+            });
+            palette.addEventListener('mousedown', function (e) { if (e.target === palette) close(); });
             document.addEventListener('keydown', function (e) {
                 if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
                     e.preventDefault();
-                    if (getComputedStyle(topbar).display !== 'none') document.body.classList.add('nav-open');
-                    input.focus();
-                    input.select();
+                    if (palette.hidden) open(); else close();
+                } else if (e.key === 'Escape') {
+                    close();
                 }
             });
         })();
@@ -148,7 +206,6 @@
             }
             document.addEventListener('scroll', update, { passive: true });
             window.addEventListener('resize', paint);
-            document.getElementById('search').addEventListener('input', paint);
             update();
         })();
     </script>
