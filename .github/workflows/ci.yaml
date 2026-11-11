@@ -27,7 +27,7 @@ jobs:
           - { name: Linux (ARM64), runner: ubuntu-24.04-arm, os: linux }
           - { name: macOS, runner: macos-latest, os: macos }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install LLVM 22 (Linux)
         if: matrix.os == 'linux'
@@ -55,11 +55,11 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install 1.96 --profile minimal --component rustfmt,clippy
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
           rustup show
 
       - name: Cargo cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
