@@ -104,12 +104,28 @@ impl ComptimeValue {
 #[derive(Clone, Debug, Default)]
 pub struct ComptimeScope {
     frames: Vec<HashMap<String, ComptimeValue>>,
+    /// Names looked up and not found, so a caller can bind them on demand
+    /// (a destructured import's const) and evaluate again.
+    misses: std::cell::RefCell<Vec<String>>,
+    /// Whether misses are recorded (only for a fold that asks for them).
+    log_misses: bool,
 }
 
 impl ComptimeScope {
     pub fn new() -> ComptimeScope {
         ComptimeScope {
             frames: vec![HashMap::new()],
+            misses: std::cell::RefCell::new(Vec::new()),
+            log_misses: false,
+        }
+    }
+
+    /// A scope that records the names looked up without a binding (see
+    /// [`ComptimeScope::take_misses`]).
+    pub fn logging_misses() -> ComptimeScope {
+        ComptimeScope {
+            log_misses: true,
+            ..ComptimeScope::new()
         }
     }
 
@@ -150,7 +166,15 @@ impl ComptimeScope {
                 return Some(v);
             }
         }
+        if self.log_misses {
+            self.misses.borrow_mut().push(name.to_string());
+        }
         None
+    }
+
+    /// The names looked up without a binding since the last call.
+    pub fn take_misses(&self) -> Vec<String> {
+        std::mem::take(&mut *self.misses.borrow_mut())
     }
 
     /// Copy every visible binding (outer->inner, inner shadows) into `dst`'s

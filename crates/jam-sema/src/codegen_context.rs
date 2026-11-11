@@ -89,7 +89,8 @@ pub struct EnumInfo<'ctx> {
 /// clones, the substitution to lower them under, and the body module that was
 /// active at stash time (so the drain lowers the bodies in the same scope the
 /// non-deferred path would have, not the empty stack at drain time).
-type DeferredMethodWork = (Vec<FunctionAST>, HashMap<String, TypeIdx>, String);
+/// (method clones, body subst, instantiating body module, defining module).
+type DeferredMethodWork = (Vec<FunctionAST>, HashMap<String, TypeIdx>, String, String);
 
 /// The codegen context. See the module docs for the lifetime rationale.
 pub struct CodegenContext<'ctx> {
@@ -145,6 +146,8 @@ pub struct CodegenContext<'ctx> {
     // withdrawn method reports "not available for this instantiation" with the
     // recorded reason instead of a bare "unknown method".
     withdrawn_methods: RefCell<HashMap<String, String>>,
+    /// LLVM symbols of instantiated generic methods (withdrawable).
+    instance_methods: RefCell<std::collections::HashSet<String>>,
 
     // Type name -> its `cfn drop`'s mangled LLVM symbol. Pre-mangled (owned
     // strings) so the registry doesn't borrow the module AST. Consulted by
@@ -178,6 +181,11 @@ pub struct CodegenContext<'ctx> {
     // frames for non-pack instantiations so an inner body never sees an outer
     // pack. `args...` expansion reads the top frame.
     current_pack: RefCell<Vec<Option<(String, u32)>>>,
+    // LLVM symbol -> C lowering of a C-ABI prototype (return + each fixed
+    // param, final classes after register demotion). Call sites and export
+    // wrappers lower by this, never by the argument expressions' types or
+    // the caller's module scope.
+    c_sigs: RefCell<HashMap<String, crate::abi::CSig>>,
 
     // module_path -> the module's anonymous struct bodies (the `return struct
     // {...}` of a generic factory), so generic instantiation can reach the body
@@ -195,6 +203,22 @@ pub struct CodegenContext<'ctx> {
     // cross-module fallback: a handle absent from the declaring module's
     // imports is an error, never resolved against the entry module's.
     import_handles: RefCell<HashMap<(String, String), String>>,
+    /// Destructuring-import bindings: (importing module, name) -> the module
+    /// the name comes from, for `const { C } = import("m")`.
+    destructured: RefCell<HashMap<(String, String), String>>,
+    /// Names of the entry module's own top-level fns: in the entry, its own
+    /// fn wins over a same-named destructured one.
+    entry_fns: RefCell<std::collections::HashSet<String>>,
+    /// A module's destructured types: (module, name) -> the source's type.
+    /// Also in the requalify map; kept apart so a generic method body (lowered
+    /// in the instantiating module) can still find its defining module's.
+    destructured_types: RefCell<HashMap<(String, String), TypeIdx>>,
+    /// Memoized folds of destructured consts, keyed (source module, name).
+    destructured_folds: RefCell<HashMap<(String, String), ComptimeValue>>,
+    /// Destructured consts being folded right now (cycle detection), and
+    /// whether the current fold read one of them (its result isn't cached).
+    destructured_in_progress: RefCell<std::collections::HashSet<(String, String)>>,
+    destructured_tainted: Cell<bool>,
     // (body_module, GenericCall TypeIdx) -> the instantiated `Named` TypeIdx.
     // Keyed by the body module too: the SAME bare `Pair(u64)` TypeIdx resolves
     // to mod_gen_a.Pair__u64 in one module and mod_gen_b.Pair__u64 in another.
@@ -221,6 +245,11 @@ pub struct CodegenContext<'ctx> {
     // the hook; the method pre-pass drains + lowers them.
     defer_method_lowering: Cell<bool>,
     pending_method_lowering: RefCell<Vec<DeferredMethodWork>>,
+    /// Module whose consts bare names resolve against, when that differs from
+    /// the body module: a generic struct's method bodies lower in the
+    /// instantiating module (type arguments are spelled there), but read the
+    /// DEFINING module's consts.
+    const_scope: RefCell<Vec<String>>,
 }
 
 /// Signature of the astgen hook that lowers an instantiated generic's methods
@@ -280,20 +309,29 @@ impl<'ctx> CodegenContext<'ctx> {
             type_module_of: RefCell::new(HashMap::new()),
             function_asts: RefCell::new(HashMap::new()),
             withdrawn_methods: RefCell::new(HashMap::new()),
+            instance_methods: RefCell::new(std::collections::HashSet::new()),
             drop_fns: RefCell::new(HashMap::new()),
             clone_fns: RefCell::new(HashMap::new()),
             requalify_map: RefCell::new(HashMap::new()),
             current_subst: RefCell::new(Vec::new()),
             current_comp_subst: RefCell::new(HashMap::new()),
             current_pack: RefCell::new(Vec::new()),
+            c_sigs: RefCell::new(HashMap::new()),
             anon_structs: RefCell::new(HashMap::new()),
             anon_enums: RefCell::new(HashMap::new()),
             type_aliases: RefCell::new(HashMap::new()),
             import_handles: RefCell::new(HashMap::new()),
+            destructured: RefCell::new(HashMap::new()),
+            entry_fns: RefCell::new(std::collections::HashSet::new()),
+            destructured_types: RefCell::new(HashMap::new()),
+            destructured_folds: RefCell::new(HashMap::new()),
+            destructured_in_progress: RefCell::new(std::collections::HashSet::new()),
+            destructured_tainted: Cell::new(false),
             module_namespaces: RefCell::new(HashMap::new()),
             method_instantiator: Cell::new(None),
             defer_method_lowering: Cell::new(false),
             pending_method_lowering: RefCell::new(Vec::new()),
+            const_scope: RefCell::new(Vec::new()),
             generic_resolutions: RefCell::new(HashMap::new()),
             module_consts: RefCell::new(HashMap::new()),
             array_expr_resolutions: RefCell::new(HashMap::new()),
@@ -312,7 +350,6 @@ impl<'ctx> CodegenContext<'ctx> {
     /// `comp const`/`comp var`) overlaid on the module-const seed.
     pub fn fold_comptime_expr_in(&self, expr: NodeIdx, local: &ComptimeScope) -> ComptimeValue {
         let ev = ComptimeEvaluator::new(&self.node_store, &self.string_pool, &self.type_pool);
-        let mut scope = ComptimeScope::new();
         // Install a cfn resolver so `bufLen(8)` in a `[N]u8` length (or any
         // comptime position) folds by running the cfn body. Depth / total-call
         // budgets shared (via Cell) across the recursion bound runaway
@@ -333,35 +370,117 @@ impl<'ctx> CodegenContext<'ctx> {
             loc: SrcLoc::new("", 0),
             host_os: Os::MacOs,
         };
-        // Fixpoint-seed: a const may reference siblings, so re-pass until stable.
-        // Only consts VISIBLE to the current body module seed the scope, bound
-        // by their bare name — so a module's `SIZE` never reads a sibling
-        // module's same-named const. (Dedup via the bare-name fixpoint below.)
-        let cur = self.current_body_module();
-        let consts: Vec<(String, NodeIdx)> = self
-            .module_consts
-            .borrow()
-            .values()
-            .filter(|v| v.module_path == cur)
-            .map(|v| (v.bare_name.clone(), v.init_expr))
-            .collect();
-        let mut progress = true;
-        while progress {
-            progress = false;
-            for (name, init) in &consts {
-                if scope.lookup(name).is_some() {
+        // Module consts fold ON DEMAND: evaluate, and for each name the
+        // evaluation looked up without finding, fold that const (the current
+        // module's own, or one it destructured from an import) in its OWN
+        // module, memoized, bind it, and evaluate again. Only names visible
+        // in the current module qualify, so a module's `SIZE` never reads a
+        // sibling's. "Current" is the const scope: a generic method body
+        // folds against its defining module, like its runtime const reads.
+        // Looked up per missed name (building these sets per fold made N
+        // untyped consts cost O(N^2)).
+        let cur = self.const_lookup_module();
+        let is_own = |name: &str| -> bool {
+            let key = if cur.is_empty() {
+                name.to_string()
+            } else {
+                format!("{cur}.{name}")
+            };
+            self.module_consts
+                .borrow()
+                .get(&key)
+                .is_some_and(|mc| mc.module_path == cur)
+        };
+        // The module's own const wins over a destructured one (as at runtime).
+        let importable = |name: &str| -> Option<String> {
+            if is_own(name) {
+                return None;
+            }
+            self.destructured
+                .borrow()
+                .get(&(cur.clone(), name.to_string()))
+                .cloned()
+        };
+        // Local comp bindings shadow module consts.
+        let mut full = ComptimeScope::logging_misses();
+        local.copy_bindings_into(&mut full);
+        let mut attempted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            // Each round re-evaluates the expression: give it the full cfn
+            // call budget again.
+            depth.set(0);
+            total.set(0);
+            full.take_misses();
+            let r = ev.eval(expr, &full, &mut ctx);
+            let mut wanted: Vec<(String, String)> = Vec::new();
+            for n in full.take_misses() {
+                if attempted.contains(&n) || wanted.iter().any(|(w, _)| *w == n) {
                     continue;
                 }
-                let v = ev.eval(*init, &scope, &mut ctx);
+                let src = if is_own(&n) {
+                    Some(cur.clone())
+                } else {
+                    importable(&n)
+                };
+                if let Some(src) = src {
+                    wanted.push((n, src));
+                }
+            }
+            if wanted.is_empty() {
+                return r;
+            }
+            for (name, src) in wanted {
+                attempted.insert(name.clone());
+                let v = self.fold_module_const(&src, &name);
                 if !v.is_none() {
-                    scope.bind(name.clone(), v);
-                    progress = true;
+                    full.bind(name, v);
                 }
             }
         }
-        // Local comp bindings shadow module consts.
-        local.copy_bindings_into(&mut scope);
-        ev.eval(expr, &scope, &mut ctx)
+    }
+
+    /// Fold module `src`'s const `name` in its own module, memoized (every
+    /// fold that names it needs it; re-folding made chains exponential).
+    fn fold_module_const(&self, src: &str, name: &str) -> ComptimeValue {
+        let key = (src.to_string(), name.to_string());
+        if let Some(v) = self.destructured_folds.borrow().get(&key) {
+            return v.clone();
+        }
+        // Already being folded further up: a cycle. Fold to nothing, and
+        // mark the results that depend on it as not cacheable.
+        if self.destructured_in_progress.borrow().contains(&key) {
+            self.destructured_tainted.set(true);
+            return ComptimeValue::None;
+        }
+        // Entry consts are keyed by their bare name.
+        let reg_key = if src.is_empty() {
+            name.to_string()
+        } else {
+            format!("{src}.{name}")
+        };
+        let Some(init) = self
+            .module_consts
+            .borrow()
+            .get(&reg_key)
+            .filter(|mc| mc.module_path == src)
+            .map(|mc| mc.init_expr)
+        else {
+            return ComptimeValue::None;
+        };
+        self.destructured_in_progress.borrow_mut().insert(key.clone());
+        let outer_taint = self.destructured_tainted.replace(false);
+        self.push_const_scope(src.to_string());
+        let v = self.fold_comptime_expr(init);
+        self.pop_const_scope();
+        self.destructured_in_progress.borrow_mut().remove(&key);
+        let tainted = self.destructured_tainted.get();
+        // A None isn't cached: it can mean "not foldable yet" (a destructured
+        // import not registered at the time).
+        if !tainted && !v.is_none() {
+            self.destructured_folds.borrow_mut().insert(key, v.clone());
+        }
+        self.destructured_tainted.set(outer_taint || tainted);
+        v
     }
 
     /// Evaluate a VALUE-returning `cfn` call at compile time: fold each arg in
@@ -702,6 +821,13 @@ impl<'ctx> CodegenContext<'ctx> {
             .anon_struct(defining_module, anon_idx)
             .ok_or_else(|| format!("astgen: missing anon struct for generic `{callee}`"))?;
 
+        // Canonical type arguments: `c.Thing` and `mod_c.Thing` name one
+        // instance.
+        let args: Vec<TypeIdx> = args
+            .iter()
+            .map(|&a| self.canonicalize_handle_type(a))
+            .collect();
+        let args = args.as_slice();
         let mut inst_name = callee.to_string();
         for &a in args {
             inst_name.push_str("__");
@@ -716,23 +842,43 @@ impl<'ctx> CodegenContext<'ctx> {
         let inst_named = self.type_pool.intern_named(sid);
 
         // bodySubst = params + the anon's synthetic name + `Self` -> the instance.
-        let mut body_subst = subst.clone();
+        // A type argument spelled through an import handle (`c.Thing`) is
+        // rewritten to its module path (`mod_c.Thing`) here, in the
+        // instantiating module: the body may name a handle `c` of its own.
+        let mut body_subst: HashMap<String, TypeIdx> = subst
+            .iter()
+            .map(|(k, &v)| (k.clone(), self.canonicalize_handle_type(v)))
+            .collect();
         body_subst.insert(anon.name.clone(), inst_named);
         body_subst.insert("Self".to_string(), inst_named);
 
-        // Fields: substitute, then requalify against the DEFINING module.
+        // Fields: requalify the template's own type names against the
+        // DEFINING module, THEN substitute the type arguments. The arguments
+        // are spelled where the instance was written (a bare `Node` of the
+        // entry module), so requalifying them in the defining module would
+        // turn the user's `Node` into that module's same-named type.
         let mut inst_fields: Vec<(String, TypeIdx)> = Vec::with_capacity(anon.fields.len());
-        for (fname, fty) in &anon.fields {
-            let subbed = substitute_type(*fty, &body_subst, &self.type_pool, &self.string_pool);
-            inst_fields.push((fname.clone(), self.requalify_type(subbed, defining_module)));
+        // See `in_template_scope`: parameter names stay bare and handles
+        // resolve in the defining module.
+        let templates: Vec<TypeIdx> = self.in_template_scope(&body_subst, defining_module, || {
+            anon.fields
+                .iter()
+                .map(|(_, fty)| self.requalify_type(*fty, defining_module))
+                .collect()
+        });
+        for ((fname, _), template) in anon.fields.iter().zip(templates) {
+            let subbed = substitute_type(template, &body_subst, &self.type_pool, &self.string_pool);
+            inst_fields.push((fname.clone(), subbed));
         }
         let named = self.context().named_struct(&inst_name);
         self.register_struct(inst_name.clone(), named, inst_fields.clone());
 
-        // Fill the LLVM body in the defining module's scope (sibling field types
-        // resolve there). Best-effort: a field that can't lower leaves the body
-        // unset (the struct is still registered for field-index resolution).
-        self.push_body_module(defining_module.to_string());
+        // Fill the LLVM body in the INSTANTIATING module's scope: the
+        // template's own types are qualified already, and a bare type
+        // argument means what it means where the instance was written.
+        // Best-effort: a field that can't lower leaves the body unset (the
+        // struct is still registered for field-index resolution).
+        self.push_body_module(self.current_body_module());
         let mut field_llvm = Vec::with_capacity(inst_fields.len());
         let mut ok = true;
         for (_, fty) in &inst_fields {
@@ -783,15 +929,139 @@ impl<'ctx> CodegenContext<'ctx> {
         // recursive instantiations) via the astgen hook, under the body subst.
         // The early bindDeclTypes pass DEFERS this (type-only instantiation) so the
         // method names intern later (the method pre-pass), matching the oracle.
+        // Bodies lower in the instantiating module (where the type arguments
+        // are spelled), with the DEFINING module's consts in scope.
         if self.defer_method_lowering.get() {
             let bm = self.current_body_module();
-            self.pending_method_lowering
-                .borrow_mut()
-                .push((clones, body_subst, bm));
+            self.pending_method_lowering.borrow_mut().push((
+                clones,
+                body_subst,
+                bm,
+                defining_module.to_string(),
+            ));
         } else if let Some(lower) = self.method_instantiator() {
-            lower(self, &clones, &body_subst)?;
+            self.push_const_scope(defining_module.to_string());
+            let r = lower(self, &clones, &body_subst);
+            self.pop_const_scope();
+            r?;
         }
         Ok(inst_named)
+    }
+
+    /// Run `f` (a requalify of a generic's TEMPLATE type, written in
+    /// `defining_module`) so that its parameter names (`T`, `Self`, the anon
+    /// name) stay bare for the substitution that follows, even when the
+    /// defining module has a type of that name or an enclosing instantiation
+    /// binds `T`, and so that its handles resolve in the defining module.
+    fn in_template_scope<R>(
+        &self,
+        params: &HashMap<String, TypeIdx>,
+        defining_module: &str,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let identity: HashMap<String, TypeIdx> = params
+            .keys()
+            .map(|k| {
+                let sid = self.string_pool.intern(k.as_bytes());
+                (k.clone(), self.type_pool.intern_named(sid))
+            })
+            .collect();
+        self.push_subst(identity);
+        self.push_const_scope(defining_module.to_string());
+        let r = f();
+        self.pop_const_scope();
+        self.pop_subst();
+        r
+    }
+
+    /// Does `hay` contain `needle` (itself, or an element / pointee / generic
+    /// argument / fn param or return of it)?
+    fn type_mentions(&self, hay: TypeIdx, needle: TypeIdx) -> bool {
+        if hay == needle {
+            return true;
+        }
+        if hay.is_none() {
+            return false;
+        }
+        let k = self.type_pool.get(hay);
+        match k.kind {
+            TypeKind::PtrSingle
+            | TypeKind::PtrMany
+            | TypeKind::Slice
+            | TypeKind::Array
+            | TypeKind::ArrayExpr => self.type_mentions(TypeIdx::new(k.a), needle),
+            TypeKind::GenericCall => self
+                .type_pool
+                .generic_args_at(k.b)
+                .iter()
+                .any(|&a| self.type_mentions(a, needle)),
+            TypeKind::Fn => {
+                self.type_mentions(TypeIdx::new(k.a), needle)
+                    || self
+                        .type_pool
+                        .fn_params_at(k.b)
+                        .iter()
+                        .any(|&p| self.type_mentions(p, needle))
+            }
+            _ => false,
+        }
+    }
+
+    /// `handle.Type` (a `Named` spelled `name`, written in `ctx_module`) ->
+    /// `module.Type` when `handle` is an import handle there and the type is
+    /// a struct, enum or union of that module; else `ty` unchanged. Written
+    /// in the current body module means the handle resolves as body code
+    /// does (a generic method's own handles first).
+    fn canonical_handle_named(&self, ty: TypeIdx, name: &str, ctx_module: &str) -> TypeIdx {
+        let Some((handle, rest)) = name.split_once('.') else {
+            return ty;
+        };
+        let module = if ctx_module == self.current_body_module() {
+            self.import_handle_module(handle)
+        } else {
+            self.import_handles
+                .borrow()
+                .get(&(ctx_module.to_string(), handle.to_string()))
+                .cloned()
+        };
+        let Some(module) = module else {
+            return ty;
+        };
+        let q = format!("{module}.{rest}");
+        let known = self.structs.borrow().contains_key(&q)
+            || self.unions.borrow().contains_key(&q)
+            || self.enums.borrow().contains_key(&q);
+        if !known {
+            return ty;
+        }
+        let sid = self.string_pool.intern(q.as_bytes());
+        self.type_pool.intern_named(sid)
+    }
+
+    /// `handle.Type` (and pointers / arrays / slices of it) with `handle` an
+    /// import handle of the current body module -> `module.Type`. Other
+    /// types are returned unchanged.
+    fn canonicalize_handle_type(&self, ty: TypeIdx) -> TypeIdx {
+        let k = self.type_pool.get(ty);
+        match k.kind {
+            TypeKind::Named => {
+                let name = self.str_name(k.a);
+                if !name.contains('.') {
+                    return ty;
+                }
+                self.canonical_handle_named(ty, &name, &self.current_body_module())
+            }
+            TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Slice | TypeKind::Array => {
+                let e = self.canonicalize_handle_type(TypeIdx::new(k.a));
+                if e == TypeIdx::new(k.a) {
+                    return ty;
+                }
+                let mut nk = k;
+                nk.a = e.raw();
+                self.type_pool.intern(nk)
+            }
+            _ => ty,
+        }
     }
 
     /// Substitute + requalify a method signature type, and if the result is a
@@ -803,14 +1073,22 @@ impl<'ctx> CodegenContext<'ctx> {
         body_subst: &HashMap<String, TypeIdx>,
         defining_module: &str,
     ) -> Result<TypeIdx, String> {
-        let subbed = substitute_type(ty, body_subst, &self.type_pool, &self.string_pool);
-        let rq = self.requalify_type(subbed, defining_module);
-        if self.type_pool.get(rq).kind == TypeKind::GenericCall {
-            let q = self.qualify_generic_callee(rq, defining_module);
+        // Like the fields: qualify the template's own names in the defining
+        // module (`in_template_scope`), then substitute the arguments,
+        // which keep the meaning they have where the instance was written.
+        let template = self.in_template_scope(body_subst, defining_module, || {
+            let t = self.requalify_type(ty, defining_module);
+            if self.type_pool.get(t).kind == TypeKind::GenericCall {
+                self.qualify_generic_callee(t, defining_module)
+            } else {
+                t
+            }
+        });
+        let q = substitute_type(template, body_subst, &self.type_pool, &self.string_pool);
+        if self.type_pool.get(q).kind == TypeKind::GenericCall {
             self.resolve_generic_call_instantiate(q)?;
-            return Ok(q);
         }
-        Ok(rq)
+        Ok(q)
     }
 
     /// Instantiate a `return enum {...}` anon body for concrete `args`: register
@@ -827,6 +1105,13 @@ impl<'ctx> CodegenContext<'ctx> {
             .anon_enum(defining_module, anon_idx)
             .ok_or_else(|| format!("astgen: missing anon enum for generic `{callee}`"))?;
 
+        // Canonical type arguments: `c.Thing` and `mod_c.Thing` name one
+        // instance.
+        let args: Vec<TypeIdx> = args
+            .iter()
+            .map(|&a| self.canonicalize_handle_type(a))
+            .collect();
+        let args = args.as_slice();
         let mut inst_name = callee.to_string();
         for &a in args {
             inst_name.push_str("__");
@@ -839,16 +1124,29 @@ impl<'ctx> CodegenContext<'ctx> {
         let sid = self.string_pool.intern(inst_name.as_bytes());
         let inst_named = self.type_pool.intern_named(sid);
 
-        let mut body_subst = subst.clone();
+        let mut body_subst: HashMap<String, TypeIdx> = subst
+            .iter()
+            .map(|(k, &v)| (k.clone(), self.canonicalize_handle_type(v)))
+            .collect();
         body_subst.insert(anon.name.clone(), inst_named);
         body_subst.insert("Self".to_string(), inst_named);
 
+        // Payloads like struct fields: qualify the template's own names in
+        // the defining module (`in_template_scope`), then substitute the
+        // arguments, which keep their meaning where the instance was written.
         let mut variants: Vec<EnumVariantInfo> = Vec::with_capacity(anon.variants.len());
         for v in &anon.variants {
             let mut payload_types: Vec<TypeIdx> = Vec::with_capacity(v.payload_types.len());
             for &ty in &v.payload_types {
-                let subbed = substitute_type(ty, &body_subst, &self.type_pool, &self.string_pool);
-                payload_types.push(self.requalify_type(subbed, defining_module));
+                let template = self.in_template_scope(&body_subst, defining_module, || {
+                    self.requalify_type(ty, defining_module)
+                });
+                payload_types.push(substitute_type(
+                    template,
+                    &body_subst,
+                    &self.type_pool,
+                    &self.string_pool,
+                ));
             }
             variants.push(EnumVariantInfo {
                 name: v.name.clone(),
@@ -974,6 +1272,10 @@ impl<'ctx> CodegenContext<'ctx> {
 
     /// The instantiated `Named` for a `GenericCall` TypeIdx, or `NONE`.
     pub fn lookup_generic_resolution(&self, ty: TypeIdx) -> TypeIdx {
+        // Keyed like `resolve_generic_call_instantiate`: with the active
+        // substitution applied, so `Pair(T)` inside `G(u8)` finds `Pair(u8)`,
+        // not the `Pair(i64)` another instance cached under the literal.
+        let ty = self.apply_current_subst(ty);
         let key = (self.current_body_module(), ty);
         self.generic_resolutions
             .borrow()
@@ -999,13 +1301,12 @@ impl<'ctx> CodegenContext<'ctx> {
         if !self.has_active_subst() {
             return ty;
         }
-        let frame = self
-            .current_subst
-            .borrow()
-            .last()
-            .cloned()
-            .unwrap_or_default();
-        substitute_type(ty, &frame, &self.type_pool, &self.string_pool)
+        // Borrowed, not cloned: this runs for every emitted instruction's type.
+        let frames = self.current_subst.borrow();
+        match frames.last() {
+            Some(frame) => substitute_type(ty, frame, &self.type_pool, &self.string_pool),
+            None => ty,
+        }
     }
 
     /// Rewrite a `Self.method` / `T.method` callee inside an instantiated body
@@ -1041,11 +1342,27 @@ impl<'ctx> CodegenContext<'ctx> {
         !self.current_subst.borrow().is_empty()
     }
 
+    /// Record the C lowering of prototype `symbol`.
+    pub fn record_c_sig(&self, symbol: &str, sig: crate::abi::CSig) {
+        self.c_sigs.borrow_mut().insert(symbol.to_string(), sig);
+    }
+
+    /// The recorded C lowering of prototype `symbol`.
+    pub fn c_sig(&self, symbol: &str) -> Option<crate::abi::CSig> {
+        self.c_sigs.borrow().get(symbol).cloned()
+    }
+
     /// The compilation target's architecture (honours `-C target`), for ABI
     /// classification. Cheap enough to parse on demand; the triple never
     /// changes mid-process.
     pub fn target_arch(&self) -> crate::target::Arch {
         crate::target::Target::from_triple_str(&jam_llvm::default_target_triple()).arch
+    }
+
+    /// The compilation target's OS (honours `-C target`), for ABI
+    /// classification (Win64 vs SysV on x86-64).
+    pub fn target_os(&self) -> crate::target::Os {
+        crate::target::Target::from_triple_str(&jam_llvm::default_target_triple()).os
     }
 
     /// Push the variadic-pack frame for an instantiated clone body about to be
@@ -1082,35 +1399,41 @@ impl<'ctx> CodegenContext<'ctx> {
     }
 
     // ---- function registry ----
+    /// Re-register `name` with a rewritten signature of the SAME declaration
+    /// (its types qualified in its module).
+    pub fn replace_function_ast(&self, name: impl Into<String>, f: FunctionAST) {
+        let name = name.into();
+        // The bare-name ownership rule of `register_function_ast` holds.
+        if !name.contains('.')
+            && let Some(prev) = self.function_asts.borrow().get(&name)
+            && prev.module_path != f.module_path
+        {
+            return;
+        }
+        self.function_asts.borrow_mut().insert(name, f);
+    }
+
     /// Register a function/method signature under `name` (the call-site lookup
-    /// key). Last registration wins. Re-declaring an extern with a DIFFERENT
-    /// signature is an error — LLVM would silently rename the duplicate
-    /// (`objc_msgSend.1`) and miscompile every call through it.
+    /// key). Two declarations of one extern must agree on how values cross
+    /// the boundary (LLVM would otherwise rename the duplicate, `objc_msgSend.1`,
+    /// and miscompile every call through it); the driver checks that once
+    /// every type's layout is final, by layout, so two modules' same-shaped
+    /// structs agree.
     pub fn register_function_ast(&self, name: impl Into<String>, f: FunctionAST) {
         let name = name.into();
-        if f.is_extern
-            && let Some(prev) = self.function_asts.borrow().get(&name)
-            && prev.is_extern
+        // An extern's or export's bare key stays with its first declaration
+        // (the entry registers first). They have no module_path, so the
+        // ownership rule below can't tell modules apart; each module reaches
+        // its own declaration through its `module.name` key.
+        if (f.is_extern || f.is_export)
+            && !name.contains('.')
+            && self
+                .function_asts
+                .borrow()
+                .get(&name)
+                .is_some_and(|prev| prev.is_extern || prev.is_export)
         {
-            let same_sig = prev.return_type == f.return_type
-                && prev.is_var_args == f.is_var_args
-                && prev.args.len() == f.args.len()
-                && prev
-                    .args
-                    .iter()
-                    .zip(f.args.iter())
-                    .all(|(a, b)| a.ty == b.ty && a.mode == b.mode);
-            if !same_sig {
-                // Registration loops re-run; report each clash once.
-                let msg = format!(
-                    "extern `{name}` is declared twice with different signatures; \
-                     every declaration of a C symbol must agree"
-                );
-                let already = self.diagnostics().all().iter().any(|d| d.message == msg);
-                if !already {
-                    self.push_error(jam_core::diag::SrcLoc::none(), msg);
-                }
-            }
+            return;
         }
         // A BARE name belongs to the first module that claims it (the entry
         // registers first, so its `nsString` isn't shadowed by an imported
@@ -1131,6 +1454,14 @@ impl<'ctx> CodegenContext<'ctx> {
     pub fn unregister_function_ast(&self, name: &str) {
         self.function_asts.borrow_mut().remove(name);
     }
+    /// Record an instantiated generic method's symbol.
+    pub fn register_instance_method(&self, name: String) {
+        self.instance_methods.borrow_mut().insert(name);
+    }
+    /// Is `name` an instantiated generic method's symbol?
+    pub fn is_instance_method(&self, name: &str) -> bool {
+        self.instance_methods.borrow().contains(name)
+    }
     /// Record why a conditionally-instantiated method was withdrawn: a call to
     /// a withdrawn method reports "not available for this instantiation —
     /// <reason>" instead of a bare "unknown method".
@@ -1142,6 +1473,10 @@ impl<'ctx> CodegenContext<'ctx> {
     /// The recorded withdrawal reason for `name`, if it was withdrawn.
     pub fn get_withdrawn_method(&self, name: &str) -> Option<String> {
         self.withdrawn_methods.borrow().get(name).cloned()
+    }
+    /// Every withdrawn method's name.
+    pub fn withdrawn_method_names(&self) -> std::collections::HashSet<String> {
+        self.withdrawn_methods.borrow().keys().cloned().collect()
     }
     /// Install the astgen hook that lowers instantiated generic method bodies.
     pub fn set_method_instantiator(&self, f: MethodInstantiator) {
@@ -1165,9 +1500,11 @@ impl<'ctx> CodegenContext<'ctx> {
         let was = self.defer_method_lowering.replace(false);
         let pending = std::mem::take(&mut *self.pending_method_lowering.borrow_mut());
         let mut result = Ok(());
-        for (clones, body_subst, bm) in pending {
+        for (clones, body_subst, bm, def) in pending {
             self.push_body_module(bm);
+            self.push_const_scope(def);
             let r = lower(self, &clones, &body_subst);
+            self.pop_const_scope();
             self.pop_body_module();
             if let Err(e) = r {
                 result = Err(e);
@@ -1197,6 +1534,7 @@ impl<'ctx> CodegenContext<'ctx> {
             .borrow_mut()
             .insert(type_name.into(), mangled_symbol.into());
     }
+
 
     /// The mangled drop-fn symbol for the type `ty` names (Struct/Named/Enum),
     /// or `None` when it has no registered drop. Resolves through `name_for_kinds`
@@ -1302,6 +1640,23 @@ impl<'ctx> CodegenContext<'ctx> {
     pub fn pop_body_module(&self) {
         self.body_module_stack.borrow_mut().pop();
     }
+    /// Enter a const scope (see the `const_scope` field).
+    pub fn push_const_scope(&self, module_path: impl Into<String>) {
+        self.const_scope.borrow_mut().push(module_path.into());
+    }
+    /// Leave the current const scope.
+    pub fn pop_const_scope(&self) {
+        self.const_scope.borrow_mut().pop();
+    }
+    /// The module bare const names resolve against: the innermost const
+    /// scope, else the body module.
+    pub fn const_lookup_module(&self) -> String {
+        self.const_scope
+            .borrow()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.current_body_module())
+    }
     /// The module whose body is currently being resolved (empty = entry module).
     pub fn current_body_module(&self) -> String {
         self.body_module_stack
@@ -1376,6 +1731,26 @@ impl<'ctx> CodegenContext<'ctx> {
                 nk.a = elem.raw();
                 return self.type_pool.intern(nk);
             }
+            // A fn type requalifies its params and return, so a fn-typed
+            // field of an imported struct (`f: fn(P) i32`) keeps naming the
+            // declaring module's `P` when used from another module.
+            TypeKind::Fn => {
+                let ret = TypeIdx::new(k.a);
+                let params = self.type_pool.fn_params_at(k.b);
+                let nret = if ret.is_none() {
+                    ret
+                } else {
+                    self.requalify_type(ret, ctx_module)
+                };
+                let nparams: Vec<TypeIdx> = params
+                    .iter()
+                    .map(|&p| self.requalify_type(p, ctx_module))
+                    .collect();
+                if nret == ret && nparams == params {
+                    return ty;
+                }
+                return self.type_pool.intern_fn(nret, nparams);
+            }
             _ => {}
         }
         if k.kind != TypeKind::Named {
@@ -1392,7 +1767,9 @@ impl<'ctx> CodegenContext<'ctx> {
             }
         }
         if name.contains('.') {
-            return ty;
+            // `handle.Type` -> `module.Type`, resolving the handle where the
+            // type was written (`ctx_module`), so one type has one spelling.
+            return self.canonical_handle_named(ty, &name, ctx_module);
         }
         // A module's OWN type wins over a same-named global alias (two modules
         // may each define `Pair`): try the body-module requalify map first.
@@ -1403,6 +1780,32 @@ impl<'ctx> CodegenContext<'ctx> {
                 .get(&(ctx_module.to_string(), name.clone()))
         {
             return q;
+        }
+        // In a generic method body (lowered in the instantiating module), a
+        // type its DEFINING module destructured. Not when this very type is
+        // one of the instance's type arguments: the entry's own `A`, passed as
+        // `T`, arrives here bare too.
+        // The instance whose body is being lowered is the innermost NON-EMPTY
+        // frame (resolving a substitution result pushes an empty one); an
+        // outer instance's arguments don't count. The type may sit inside an
+        // argument (`[2]A`, `*A`, `Vec(A)`), not just be one.
+        let in_generic_body = ctx_module == self.current_body_module()
+            && self.const_lookup_module() != ctx_module;
+        let is_type_argument = || {
+            self.current_subst
+                .borrow()
+                .iter()
+                .rev()
+                .find(|frame| !frame.is_empty())
+                .is_some_and(|frame| frame.values().any(|&v| self.type_mentions(v, ty)))
+        };
+        if in_generic_body && !is_type_argument() {
+            let cm = self.const_lookup_module();
+            if cm != ctx_module
+                && let Some(&q) = self.destructured_types.borrow().get(&(cm, name.clone()))
+            {
+                return q;
+            }
         }
         // Then a destructuring-import alias (`Token` -> `m.Token`), which is a
         // qualified `Named`: resolve the SPELLING. A type-alias-const whose
@@ -1666,12 +2069,55 @@ impl<'ctx> CodegenContext<'ctx> {
         self.enums.borrow().get(&name).and_then(|e| e.ty)
     }
     /// `(max_payload_size, max_payload_align)` for the enum, or `None`.
+    ///
+    /// Before the analyzer has filled the enum (an imported module's `extern`
+    /// / `export` prototypes are declared ahead of the type bodies), the
+    /// layout is computed from the payload types instead of reading the
+    /// unfilled `(0, 1)`, which sized a C-crossing enum wrong.
     pub fn enum_payload_layout(&self, ty: TypeIdx) -> Option<(u64, u64)> {
         let name = self.name_for_kinds(ty, &[TypeKind::Enum, TypeKind::Named])?;
-        self.enums
-            .borrow()
-            .get(&name)
-            .map(|e| (e.max_payload_size, e.max_payload_align))
+        let (filled, layout, variants) = {
+            let enums = self.enums.borrow();
+            let e = enums.get(&name)?;
+            (
+                e.ty.is_some() || !e.has_payload_variant,
+                (e.max_payload_size, e.max_payload_align),
+                e.variants.clone(),
+            )
+        };
+        if filled {
+            return Some(layout);
+        }
+        thread_local! {
+            static IN_PROGRESS: RefCell<std::collections::HashSet<String>> =
+                RefCell::new(std::collections::HashSet::new());
+        }
+        if !IN_PROGRESS.with(|p| p.borrow_mut().insert(name.clone())) {
+            return Some(layout);
+        }
+        let module = name.rsplit_once('.').map(|(m, _)| m).unwrap_or("");
+        self.push_body_module(module.to_string());
+        let round_up = |off: u64, a: u64| if a > 1 { off.div_ceil(a) * a } else { off };
+        let mut computed = Some((0u64, 1u64));
+        'outer: for v in &variants {
+            let (mut off, mut var_align) = (0u64, 1u64);
+            for &t in &v.payload_types {
+                let (Ok(sz), Ok(al)) = (self.type_size(t), self.type_align(t)) else {
+                    computed = None;
+                    break 'outer;
+                };
+                off = round_up(off, al) + sz;
+                var_align = var_align.max(al);
+            }
+            off = round_up(off, var_align);
+            if let Some((ms, ma)) = computed.as_mut() {
+                *ms = (*ms).max(off);
+                *ma = (*ma).max(var_align);
+            }
+        }
+        self.pop_body_module();
+        IN_PROGRESS.with(|p| p.borrow_mut().remove(&name));
+        Some(computed.unwrap_or(layout))
     }
     /// The registered enum name a `Enum`/`Named` TypeIdx resolves to, or `None`
     /// when it isn't a registered enum.
@@ -1771,6 +2217,45 @@ impl<'ctx> CodegenContext<'ctx> {
     pub fn register_type_alias(&self, name: impl Into<String>, target: TypeIdx) {
         self.type_aliases.borrow_mut().insert(name.into(), target);
     }
+    /// The module handle `name` in module `owner` points at, if any.
+    pub fn import_handle_of(&self, owner: &str, name: &str) -> Option<String> {
+        self.import_handles
+            .borrow()
+            .get(&(owner.to_string(), name.to_string()))
+            .cloned()
+    }
+    /// Record that module `owner` destructured `name` out of `module`.
+    pub fn register_destructured(
+        &self,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        module: impl Into<String>,
+    ) {
+        self.destructured
+            .borrow_mut()
+            .insert((owner.into(), name.into()), module.into());
+    }
+    /// Record module `owner`'s destructured type `name`.
+    pub fn register_destructured_type(&self, owner: &str, name: &str, ty: TypeIdx) {
+        self.destructured_types
+            .borrow_mut()
+            .insert((owner.to_string(), name.to_string()), ty);
+    }
+    /// Record a top-level fn of the entry module.
+    pub fn register_entry_fn(&self, name: String) {
+        self.entry_fns.borrow_mut().insert(name);
+    }
+    /// Is `name` a top-level fn the entry module defines?
+    pub fn is_entry_fn(&self, name: &str) -> bool {
+        self.entry_fns.borrow().contains(name)
+    }
+    /// The module the current body module destructured `name` from, if any.
+    pub fn destructured_module(&self, name: &str) -> Option<String> {
+        self.destructured
+            .borrow()
+            .get(&(self.const_lookup_module(), name.to_string()))
+            .cloned()
+    }
     /// Register an import handle (`const lib = import("m")`) -> module
     /// identity, scoped to the module that declared the import (entry = "").
     pub fn register_import_handle(
@@ -1787,9 +2272,13 @@ impl<'ctx> CodegenContext<'ctx> {
     /// BODY MODULE, if any. No cross-module fallback: an imported body must
     /// not see the entry module's handles.
     pub fn import_handle_module(&self, name: &str) -> Option<String> {
-        self.import_handles
-            .borrow()
-            .get(&(self.current_body_module(), name.to_string()))
+        // A generic method's body names its DEFINING module's handles (type
+        // arguments spelled through the caller's handles were canonicalized
+        // at instantiation); then the body module's.
+        let handles = self.import_handles.borrow();
+        handles
+            .get(&(self.const_lookup_module(), name.to_string()))
+            .or_else(|| handles.get(&(self.current_body_module(), name.to_string())))
             .cloned()
     }
     /// Format a qualified-name lookup miss. `qualified` is the dotted spelling
@@ -2198,6 +2687,15 @@ impl<'ctx> CodegenContext<'ctx> {
                     let (_mps, mpa) = self.enum_payload_layout(ty).unwrap();
                     return Ok(if has_payload { mpa } else { 1 });
                 }
+                // Alias chase, as type_size does (`const T = i64` as a field
+                // or payload type).
+                if k.kind == TypeKind::Named {
+                    let alias = self.lookup_type_alias(&self.str_name(k.a));
+                    if !alias.is_none() && alias != ty {
+                        let resolved = self.resolve_generic_call_instantiate(alias)?;
+                        return self.type_align(resolved);
+                    }
+                }
                 Err("type_align: unresolved user type (subst/alias resolution deferred)".into())
             }
             TypeKind::Union => match self.union_fields(ty) {
@@ -2260,7 +2758,7 @@ impl CompCallResolver for CfnResolver<'_, '_> {
     ) -> ComptimeValue {
         // Resolve against the body module first, then the bare name — two
         // modules may each define a same-named cfn.
-        let cur = self.ctx.current_body_module();
+        let cur = self.ctx.const_lookup_module();
         let f = if !cur.is_empty() && !name.contains('.') {
             self.ctx
                 .get_function_ast(&format!("{cur}.{name}"))
