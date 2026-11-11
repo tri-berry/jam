@@ -233,7 +233,28 @@ code, pre, kbd { font-family: var(--mono); }
 /* Section separators in markdown read as extra breathing room. */
 .content hr { border: 0; margin: 0; }
 
-.content-foot { margin-top: 3rem; }
+/* Previous / next page links at the end of each page. */
+.pager {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-top: 5rem;
+}
+.content .pager a {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.9rem 1.25rem;
+    min-width: 11rem;
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    text-decoration: none;
+    transition: border-color 0.15s;
+}
+.content .pager a:hover { border-color: rgba(255, 255, 255, 0.28); }
+.pager span { color: var(--text-muted); font-size: 0.875rem; }
+.pager-next { margin-left: auto; text-align: right; }
+.pager + .content-foot { margin-top: 3rem; }
 
 .content-foot {
     margin-top: 6rem;

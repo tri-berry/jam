@@ -17,6 +17,17 @@
         <main class="content">
             {{ content }}
 
+            {% assign pages = "" | split: "" %}
+            {% for group in site.data.nav %}{% for item in group.items %}{% assign pages = pages | push: item %}{% endfor %}{% endfor %}
+            {% for item in pages %}{% if item.url == page.url %}
+            {% assign prev_i = forloop.index0 | minus: 1 %}
+            {% assign next_i = forloop.index0 | plus: 1 %}
+            <nav class="pager" aria-label="Pages">
+                {% if prev_i >= 0 %}<a class="pager-prev" href="{{ pages[prev_i].url | relative_url }}"><span>Previous</span>{{ pages[prev_i].name }}</a>{% endif %}
+                {% if next_i < pages.size %}<a class="pager-next" href="{{ pages[next_i].url | relative_url }}"><span>Next</span>{{ pages[next_i].name }}</a>{% endif %}
+            </nav>
+            {% endif %}{% endfor %}
+
             <footer class="content-foot">
                 &copy; {{ 'now' | date: "%Y" }} Raphael Amorim
             </footer>
