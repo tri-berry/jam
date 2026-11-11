@@ -1,16 +1,16 @@
 /* Dark docs theme: fixed sidebar on the left, one reading column. */
 
 :root {
-    --bg: #111111;
-    --surface: #181818;
+    --bg: #0f1416;
+    --surface: #161c1f;
     --border: rgba(255, 255, 255, 0.12);
     --border-soft: rgba(255, 255, 255, 0.07);
-    --text: #f2f2f2;
-    --text-body: #a6a6a6;
-    --text-muted: #7a7a7a;
-    --nav: #c4c4c4;
-    --accent: #ff8a5c;
-    --accent-bg: rgba(255, 120, 70, 0.14);
+    --text: #eef3f4;
+    --text-body: #a2adb0;
+    --text-muted: #748084;
+    --nav: #c0cacd;
+    --accent: #8cc7d9;
+    --accent-bg: rgba(140, 199, 217, 0.14);
     --sidebar-w: 21rem;
     --mono: 'Menlo', 'Monaco', 'Courier New', monospace;
 }
@@ -34,7 +34,7 @@ body {
 }
 
 ::selection {
-    background: rgba(255, 138, 92, 0.35);
+    background: rgba(140, 199, 217, 0.32);
     color: #fff;
 }
 
@@ -56,7 +56,7 @@ code, pre, kbd { font-family: var(--mono); }
     padding: 3rem 3.5rem 2rem 2rem;
     overflow-y: auto;
     scrollbar-width: thin;
-    scrollbar-color: #2a2a2a transparent;
+    scrollbar-color: #283135 transparent;
 }
 
 .sidebar-logo {
@@ -311,28 +311,28 @@ code, pre, kbd { font-family: var(--mono); }
     border-radius: 1rem;
     font-size: 0.875rem;
     line-height: 1.65;
-    color: #e6e6e6;
+    color: #e2e8ea;
 }
 .content pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
 /* Rouge wraps fenced blocks in div.highlight; keep the <pre> as the card. */
 .content div.highlight, .content div.highlighter-rouge { background: none; }
 
 /* ------------------------------------------------------------------ */
-/* Prism tokens for `language-jam` (see jam-prism.js). Dracula hues,   */
-/* softened a touch to sit on the near-black background.              */
+/* Prism tokens for `language-jam` (see jam-prism.js). hues drawn  */
+/* from the mascot: jar blue, lid plum, cheek pink, cover cream.      */
 /* ------------------------------------------------------------------ */
 
-.content .token.comment        { color: #6b7394; font-style: italic; }
+.content .token.comment        { color: #627680; font-style: italic; }
 .content .token.string,
-.content .token.string .token.escape { color: #e9e59a; }
+.content .token.string .token.escape { color: #e8dca0; }
 .content .token.number,
-.content .token.boolean        { color: #ffb37a; }
+.content .token.boolean        { color: #f2a6a0; }
 .content .token.keyword,
 .content .token.intrinsic,
-.content .token.operator       { color: #ff86c8; }
-.content .token.builtin        { color: #8fdcf0; }
-.content .token.function       { color: #7ee89a; }
-.content .token.punctuation    { color: #bdbdbd; }
+.content .token.operator       { color: #c99ad0; }
+.content .token.builtin        { color: #8cc7d9; }
+.content .token.function       { color: #9fd8b4; }
+.content .token.punctuation    { color: #b4bfc2; }
 
 /* ------------------------------------------------------------------ */
 /* Mobile                                                             */
@@ -349,7 +349,7 @@ code, pre, kbd { font-family: var(--mono); }
         align-items: center;
         justify-content: space-between;
         padding: 0.75rem 1rem;
-        background: rgba(17, 17, 17, 0.9);
+        background: rgba(15, 20, 22, 0.9);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border-bottom: 1px solid var(--border-soft);
