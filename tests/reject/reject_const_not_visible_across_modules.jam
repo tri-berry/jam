@@ -1,0 +1,10 @@
+// A module can't see another module's consts by bare name (an imported
+// module used to read the entry's `Q`, typed with the wrong `P`).
+// expect-error: unknown variable `Q`
+
+const m = import("mod_entry_const_user");
+const Q: i64 = 40;
+
+fn main() {
+    var x: i64 = m.useQ();
+}

@@ -1,0 +1,6 @@
+// Helper for test_destructured_const_scope.jam.
+pub const P = struct { a: i64, b: i64 };
+const K: i64 = 30;
+pub const C: P = P { a: K, b: 4 };
+pub const U = 77;
+pub fn sum(p: P) i64 { return p.a + p.b; }

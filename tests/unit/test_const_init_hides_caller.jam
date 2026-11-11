@@ -1,0 +1,24 @@
+// Reading an imported const whose init names `k` must not touch the
+// caller's local `k`: the local is still dropped (the init used to cancel
+// its drop), and the const sees its own module's `k`.
+
+const m = import("mod_drop_shadow");
+
+fn bump(p: *mut u32) { var q: *mut u32 = p; q.* = q.* + 1; }
+const Thing = struct {
+    sink: *mut u32,
+    cfn drop(self: mut Self) { bump(self.sink); }
+};
+
+fn useConst(hits: *mut u32) i64 {
+    var k: Thing = Thing { sink: hits };
+    var h = m.H;
+    return h.a;
+}
+
+tfn callerLocalStillDropped() {
+    var hits: u32 = 0;
+    var a: i64 = useConst(&hits);
+    assert(a, 3);
+    assert(hits, 1);
+}

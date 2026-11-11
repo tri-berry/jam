@@ -1,0 +1,9 @@
+// An error inside an imported const's init is reported at the line using
+// it, in this file, naming the const.
+// expect-error: reject_const_error_in_other_module.jam:8: error: unknown variable `nope` (the value of const `m.E`)
+
+const m = import("mod_const_bad_init");
+
+fn main() {
+    var x: i32 = m.E;
+}

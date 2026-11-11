@@ -1,0 +1,10 @@
+// A cast's width hint covers its operand's arithmetic, not a call argument
+// inside it: `f(K) as u8` checks `K` against `f`'s parameter.
+// expect-error: the value of const `K` (300) does not fit `u8`
+
+const K = 200 + 100;
+fn f(a: u8) u8 { return a; }
+
+fn main() {
+    var y: u8 = f(K) as u8;
+}

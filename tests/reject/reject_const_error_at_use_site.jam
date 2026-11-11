@@ -1,0 +1,11 @@
+// A const whose value doesn't fit is reported at the line that uses it, not
+// at the const's declaration, and names the const.
+// expect-error: reject_const_error_at_use_site.jam:10: error: integer literal 300 does not fit `u8` (the value of const `BIG`)
+
+const BIG = 300;
+
+fn main() {
+    var x: u8 = 1;
+    x = x + 1;
+    x = BIG;
+}

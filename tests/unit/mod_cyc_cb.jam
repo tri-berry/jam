@@ -1,0 +1,4 @@
+// See mod_cyc_ca.jam.
+const { X, Z } = import("mod_cyc_ca");
+pub const Y = 5;
+pub fn lens() i64 { return @sizeOf([X]u8) as i64 + @sizeOf([Z]u8) as i64; }

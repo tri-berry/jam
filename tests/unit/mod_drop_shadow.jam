@@ -1,0 +1,5 @@
+// Helper for test_const_init_hides_caller.jam: a const whose init reads a
+// module const `k`, while the caller has a drop-tracked local `k`.
+pub const Pair = struct { a: i64, b: i64 };
+const k: i64 = 3;
+pub const H: Pair = Pair { a: k, b: 1 };

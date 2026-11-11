@@ -1,0 +1,48 @@
+// An imported const is computed in its own module: its types, fns and
+// consts are that module's, never this file's same-named ones or the
+// caller's locals. Its struct type stays the module's `P` here.
+
+const m = import("mod_const_scope");
+
+// Same names as mod_const_scope, different meanings.
+const P = struct { b: i8, a: i64 };
+fn helper(x: i64) i64 { return x + 1000; }
+const BASE: i64 = 99;
+comp const CB = 100;
+
+fn firstA(p: m.P) i64 { return p.a; }
+
+tfn structConstKeepsItsModulesType() {
+    var c = m.C;
+    assert(c.a, 10);
+    assert(c.b, 4);
+    assert(m.enc(c), 1004);
+    assert(m.enc(m.C), 1004);
+}
+
+tfn untypedStructConst() {
+    var d: m.P = m.D;
+    assert(d.a + d.b, 44);
+}
+
+tfn callerLocalsDontLeakIn() {
+    var K: i32 = 41;
+    assert(m.A, 2);
+    assert(K, 41);
+}
+
+tfn compConstFoldsInItsModule() {
+    assert(m.N, 11);
+    assert(CB, 100);
+}
+
+tfn fnTypedConst() {
+    var g = m.G;
+    assert(g(m.P { a: 1, b: 2 }), 3);
+}
+
+tfn importedFnTakingAFnValue() {
+    var cw: fn(fn(m.P) i64) i64 = m.callWith;
+    var f: fn(m.P) i64 = firstA;
+    assert(cw(firstA) + cw(f), 20);
+}

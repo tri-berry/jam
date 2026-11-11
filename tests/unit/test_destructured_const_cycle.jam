@@ -1,0 +1,15 @@
+// Modules that destructure consts from each other fold every const that is
+// well defined, whatever order the folds happen in, and a module's own
+// const can use a destructured one in a comptime position.
+const cb = import("mod_cyc_cb");
+const { K3 } = import("mod_generic_thing");
+comp const J = K3 + 1;
+
+tfn mutuallyDestructuredConstsFold() {
+    assert(cb.lens(), 111);
+}
+
+tfn compConstFromADestructuredOne() {
+    var a: [J]u8 = [0; J];
+    assert(@sizeOf([J]u8), 4);
+}

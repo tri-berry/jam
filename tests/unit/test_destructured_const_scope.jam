@@ -1,0 +1,12 @@
+// A destructured const is still computed in its own module (`K` is that
+// module's, not this file's).
+
+const { C, sum, U } = import("mod_destructure_const");
+const K: i64 = 1000;
+
+tfn destructuredConstUsesItsModule() {
+    var c = C;
+    var u: u8 = U;
+    assert(sum(c), 34);
+    assert(u, 77);
+}

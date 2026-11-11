@@ -1,0 +1,43 @@
+// An untyped module const (`const BASE = 100`) used to settle at its
+// smallest fit (u8): `x = BASE` into a u64 stored one byte and left the
+// rest of the slot stale. It now takes the use site's type.
+
+const { assert } = import("test");
+
+const BASE = 100;
+const BIG = 70000;
+
+tfn untypedConstAssignedToWideSlot() {
+    var x: u64 = 0xFFFFFFFFFFFFFFFF;
+    x = BASE;
+    assert(x, 100);
+}
+
+tfn untypedConstInitialisesAnyWidth() {
+    var a: i32 = BASE;
+    var b: u32 = BIG;
+    var c: i64 = BASE * 3;
+    assert(a, 100);
+    assert(b, 70000);
+    assert(c, 300);
+}
+
+tfn literalCastStillReinterprets() {
+    var m: i32 = 0xFFFFFFFF as i32;
+    assert(m, -1);
+}
+
+const FLAGS = 0x1234;
+const MASK = 0xFFFFFFFF;
+
+tfn untypedConstInsideCastComputesWide() {
+    // The cast operand computes at 64 bits and the cast truncates.
+    var hi: u8 = (FLAGS >> 8) as u8;
+    assert(hi, 0x12);
+    var lo: u8 = (BIG / 256) as u8;
+    assert(lo, 17);
+    var m: i32 = MASK as i32;
+    assert(m, -1);
+    var s: u8 = (0x1234 >> 8) as u8;
+    assert(s, 0x12);
+}

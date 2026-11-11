@@ -1,0 +1,35 @@
+// A variable declared in an inner block stops being visible when the block
+// ends: later code sees the outer binding again (it used to see the inner
+// one), and a later same-named declaration takes its own address.
+
+const N = struct { next: *const N, v: i64 };
+
+const C = struct { sink: *mut u32, k: u32 };
+cfn drop(self: mut C) { var p: *mut u32 = self.sink; p.* = p.* + self.k; }
+fn consume(c: move C) {}
+
+tfn outerBindingVisibleAgain() {
+    var x: i32 = 1;
+    if (true) { var x: i32 = 5; x = x + 1; }
+    assert(x, 1);
+}
+
+tfn laterDeclarationTakesItsOwnAddress() {
+    var flag: i64 = 1;
+    if (flag == 1) { var tmp: N = N { next: &tmp, v: 100 }; flag = tmp.v; }
+    var tmp: N = N { next: &tmp, v: 7 };
+    tmp.v = 8;
+    assert(tmp.next.*.v, 8);
+}
+
+tfn consumingAfterTheBlockMovesTheOuterValue() {
+    var a: u32 = 0;
+    var b: u32 = 0;
+    if (true) {
+        var c = C { sink: &a, k: 1 };
+        if (true) { var c = C { sink: &b, k: 10 }; }
+        consume(c);
+    }
+    assert(a, 1);
+    assert(b, 10);
+}

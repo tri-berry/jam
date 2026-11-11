@@ -1,0 +1,1 @@
+pub fn useQ() i64 { var q: i64 = Q; return q; }

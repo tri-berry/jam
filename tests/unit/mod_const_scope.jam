@@ -1,0 +1,17 @@
+// Helper for test_const_scope_across_modules.jam: consts whose types and
+// inits use this module's own `P`, `BASE`, `K` and `helper`, all of which
+// the test file shadows with its own.
+pub const P = struct { a: i64, b: i64 };
+fn helper(x: i64) i64 { return x * 10; }
+const BASE: i64 = 4;
+const K: i32 = 1;
+comp const CB = 10;
+fn sum(p: P) i64 { return p.a + p.b; }
+
+pub const C: P = P { a: helper(1), b: BASE };
+pub const D = P { a: BASE, b: helper(BASE) };
+pub const A: i32 = K + 1;
+pub comp const N = CB + 1;
+pub const G: fn(P) i64 = sum;
+pub fn enc(p: P) i64 { return p.a * 100 + p.b; }
+pub fn callWith(f: fn(P) i64) i64 { return f(P { a: 10, b: 20 }); }

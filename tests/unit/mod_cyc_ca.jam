@@ -1,0 +1,4 @@
+// With mod_cyc_cb.jam: two modules destructuring consts from each other.
+const { Y } = import("mod_cyc_cb");
+pub const X = Y + 1;
+pub const Z = Y + 100;
