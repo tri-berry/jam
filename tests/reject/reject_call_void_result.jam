@@ -1,0 +1,10 @@
+// The result of a call that returns nothing can't be called (the outer
+// call used to be dropped silently, its arguments never checked).
+// expect-error: only a function value can be called
+
+fn v(p: *mut[] i32) { p[0] = p[0] + 1; }
+
+fn main() {
+    var k: [1]i32 = [0];
+    v(k.asMutPtr())(1);
+}

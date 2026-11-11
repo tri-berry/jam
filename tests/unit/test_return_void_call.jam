@@ -1,0 +1,13 @@
+// `return v();` in a fn that returns nothing runs the call and returns
+// (it used to emit invalid IR).
+
+fn bump(p: *mut[] i32) { p[0] = p[0] + 1; }
+fn viaReturn(p: *mut[] i32) { return bump(p); }
+fn viaReturnVoid(p: *mut[] i32) void { return bump(p); }
+
+tfn returnOfAVoidCall() {
+    var hits: [1]i32 = [0];
+    viaReturn(hits.asMutPtr());
+    viaReturnVoid(hits.asMutPtr());
+    assert(hits[0], 2);
+}

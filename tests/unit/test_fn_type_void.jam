@@ -1,0 +1,50 @@
+// `fn(..)` with no return type is a fn type, `void` spells the same "returns
+// nothing" in declarations and fn types, and any expression yielding a fn
+// value can be called.
+
+fn bump(p: *mut[] i32) void { p[0] = p[0] + 1; }
+fn bumpTwice(p: *mut[] i32) { p[0] = p[0] + 2; }
+fn pick(b: bool) fn(*mut[] i32) {
+    if (b) { return bump; }
+    return bumpTwice;
+}
+fn seven() i32 { return 7; }
+fn nothing() void {}
+fn pickSeven() fn() i32 { return seven; }
+fn inc(x: i32) i32 { return x + 1; }
+fn dbl(x: i32) i32 { return x * 2; }
+
+const S = struct { cb: fn(*mut[] i32), n: i32 };
+
+tfn voidAndOmittedReturnAgree() {
+    var hits: [1]i32 = [0];
+    var f: fn(*mut[] i32) void = bump;
+    var g: fn(*mut[] i32) = bumpTwice;
+    f(hits.asMutPtr());
+    g(hits.asMutPtr());
+    f = g;
+    f(hits.asMutPtr());
+    assert(hits[0], 5);
+    var n: fn() = nothing;
+    n();
+}
+
+tfn fnFieldWithoutReturn() {
+    var hits: [1]i32 = [0];
+    var s: S = S { cb: bump, n: 1 };
+    s.cb(hits.asMutPtr());
+    assert(hits[0], 1);
+}
+
+tfn callTheResultOfACall() {
+    var hits: [1]i32 = [0];
+    pick(true)(hits.asMutPtr());
+    pick(false)(hits.asMutPtr());
+    assert(hits[0], 3);
+    assert(pickSeven()(), 7);
+}
+
+tfn callAnIndexedFn() {
+    var fs: [2]fn(i32) i32 = [inc, dbl];
+    assert(fs[1](20) + fs[0](1), 42);
+}

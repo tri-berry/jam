@@ -1,0 +1,9 @@
+// A call that returns nothing can't be a condition (it used to crash).
+// expect-error: reject_void_call_condition.jam:8: error: type mismatch: the call returns nothing, so it has no value
+
+fn v() {}
+
+fn main() {
+    var x: i32 = 0;
+    if (v()) { x = 1; }
+}

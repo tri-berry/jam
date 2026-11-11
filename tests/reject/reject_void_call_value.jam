@@ -1,0 +1,8 @@
+// A call that returns nothing has no value to put in a variable.
+// expect-error: the call returns nothing, so it has no value
+
+fn v() {}
+
+fn main() {
+    var x: i32 = v();
+}

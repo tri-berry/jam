@@ -1,0 +1,6 @@
+// `void` means "returns nothing" in return position, so it can't name a type.
+// expect-error: `void` is reserved and can't name a type or constant
+
+const void = struct { a: i32 };
+
+fn main() {}

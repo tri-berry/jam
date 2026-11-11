@@ -1,0 +1,11 @@
+// A call that returns nothing can't be an operand, an argument or a field
+// value (each used to read garbage).
+// expect-error: reject_void_call_operand.jam:10: error: type mismatch: the call returns nothing, so it has no value
+
+fn v() {}
+fn t(x: i32) i32 { return x; }
+const Q = struct { a: i32 };
+
+fn main() {
+    var x: i32 = v() + 1;
+}
