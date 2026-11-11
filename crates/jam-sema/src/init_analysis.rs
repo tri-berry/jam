@@ -1323,6 +1323,11 @@ impl<'a, 'ctx> Analyzer<'a, 'ctx> {
     /// Uninit; for drop-bearing types the move is validated against the rules
     /// that keep codegen's lexical drop suppression sound.
     fn apply_move_to_binding(&mut self, name: &str, anchor: NodeIdx, state: &mut NameMap) {
+        // Only a binding can be moved: a fn, global or const named as a
+        // `move` argument (`v.push(dbl)` with a fn `dbl`) stays usable.
+        if !self.var_types.contains_key(name) && !state.contains_key(name) {
+            return;
+        }
         if self.binding_is_drop_bearing(name) {
             match self.decl_depth.get(name).copied() {
                 None => {
