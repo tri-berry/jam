@@ -1,257 +1,391 @@
-/* Inter Font Family */
-body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+/* Dark docs theme: fixed sidebar on the left, one reading column. */
+
+:root {
+    --bg: #111111;
+    --surface: #181818;
+    --border: rgba(255, 255, 255, 0.12);
+    --border-soft: rgba(255, 255, 255, 0.07);
+    --text: #f2f2f2;
+    --text-body: #a6a6a6;
+    --text-muted: #7a7a7a;
+    --nav: #c4c4c4;
+    --accent: #ff8a5c;
+    --accent-bg: rgba(255, 120, 70, 0.14);
+    --sidebar-w: 21rem;
+    --mono: 'Menlo', 'Monaco', 'Courier New', monospace;
 }
 
-/* Code font for the editor */
-code, pre, .font-mono {
-    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
-/* Custom selection color */
-::selection {
-    background: #fbcfe8; /* Pink-200 */
-    color: #831843; /* Pink-900 */
-}
-
-/* Smooth scrolling */
 html {
     scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
 }
 
-/* Glass Navigation */
-.glass-nav {
-    background: rgba(255, 253, 253, 0.9);
-    backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(253, 224, 233, 0.5);
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text-body);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
-/* Gradient Text Utility */
-.text-gradient {
-    background-clip: text;
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-image: linear-gradient(to right, #db2777, #e11d48);
+::selection {
+    background: rgba(255, 138, 92, 0.35);
+    color: #fff;
 }
 
-/* Sidebar active state */
-.nav-link.active {
-    color: #db2777; /* Pink-600 */
-    background-color: #fdf2f8; /* Pink-50 */
-    border-right: 3px solid #db2777;
-}
+a { color: inherit; }
+img { max-width: 100%; }
 
-/* Custom Scrollbar for sidebar */
-.sidebar-scroll::-webkit-scrollbar {
-    width: 4px;
-}
-.sidebar-scroll::-webkit-scrollbar-track {
-    background: transparent;
-}
-.sidebar-scroll::-webkit-scrollbar-thumb {
-    background-color: #fbcfe8;
-    border-radius: 20px;
-}
-
-/* Step Number Styling (Tour) */
-.step-number {
-    font-family: 'Menlo', monospace;
-    background: linear-gradient(135deg, #fbcfe8 0%, #f472b6 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-}
-
-/* Code block styling — Dracula palette
-   (https://draculatheme.com/spec) */
-pre {
-    color: #f8f8f2;                  /* Dracula Foreground */
-}
-.code-block {
-    background-color: #282a36;       /* Dracula Background */
-    border: 1px solid #44475a;       /* Dracula Selection */
-}
-
-.code-block-header {
-    background-color: #21222c;       /* ANSI Black — slightly darker band */
-    border-bottom: 1px solid #44475a;
-}
-
-/* Syntax highlighting colors (Dracula spec mappings). Used by hand-
-   rolled spans on the tour page; Prism tokens further below mirror
-   these hues. */
-.syn-keyword  { color: #ff79c6; }    /* Pink   — keywords, control flow, modifiers */
-.syn-function { color: #50fa7b; }    /* Green  — function names */
-.syn-type     { color: #8be9fd; }    /* Cyan   — types, classes, interfaces */
-.syn-string   { color: #f1fa8c; }    /* Yellow — strings, escapes */
-.syn-number   { color: #ffb86c; }    /* Orange — numbers, booleans, constants */
-.syn-comment  { color: #6272a4; font-style: italic; }   /* Comment — italic per spec */
-.syn-struct   { color: #8be9fd; }    /* Cyan   — types */
+code, pre, kbd { font-family: var(--mono); }
 
 /* ------------------------------------------------------------------ */
-/* Docs content chrome — applies to markdown-emitted elements inside  */
-/* the docs <main>. The existing HTML reference page uses inline      */
-/* Tailwind utility classes which take precedence, so these rules are */
-/* a no-op there and only kick in for plain markdown output.          */
+/* Sidebar                                                            */
 /* ------------------------------------------------------------------ */
 
-/* Headings — typography + anchor offset. */
-main h1 {
-    font-size: 2.25rem;
-    font-weight: 700;
-    color: rgb(15 23 42);                  /* slate-900 */
-    margin-top: 0.5rem;
-    margin-bottom: 1.5rem;
-    scroll-margin-top: 6rem;
+.sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    right: 0;
+    width: var(--sidebar-w);
+    padding: 3rem 3.5rem 2rem 2rem;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: #2a2a2a transparent;
 }
-main h2 {
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: rgb(15 23 42);                  /* slate-900 */
-    margin-top: 3rem;
-    margin-bottom: 1.5rem;
-    scroll-margin-top: 6rem;
-}
-main h3 {
-    font-size: 1.125rem;
-    font-weight: 700;
-    color: rgb(30 41 59);                  /* slate-800 */
-    margin-top: 2rem;
-    margin-bottom: 1rem;
-    scroll-margin-top: 6rem;
-}
-main h4 { scroll-margin-top: 6rem; }
 
-/* Paragraphs, lists, links. */
-main p {
-    color: rgb(71 85 105);                 /* slate-600 */
-    margin-bottom: 1.5rem;
-    line-height: 1.75;
+.sidebar-logo {
+    display: inline-block;
+    margin: 0 0 1.5rem 0;
 }
-main ul, main ol {
-    color: rgb(71 85 105);
-    margin-bottom: 1.5rem;
-    padding-left: 1.5rem;
+.sidebar-logo img,
+.topbar-logo img {
+    display: block;
+    width: 4.5rem;
+    height: 4.5rem;
+    object-fit: contain;
 }
-main ul { list-style: disc; }
-main ol { list-style: decimal; }
-main li { margin-bottom: 0.25rem; }
-main a {
-    color: rgb(219 39 119);                /* pink-600 */
-    text-decoration: none;
+
+.search {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    height: 2.6rem;
+    padding: 0 1rem;
+    margin-bottom: 2.25rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    cursor: text;
+    transition: border-color 0.15s;
 }
-main a:hover { text-decoration: underline; }
-main hr {
+.search:focus-within { border-color: rgba(255, 255, 255, 0.28); }
+.search svg { width: 1rem; height: 1rem; flex: none; }
+.search input {
+    flex: 1;
+    min-width: 0;
+    background: none;
     border: 0;
-    border-top: 1px solid rgb(241 245 249);  /* slate-100 */
-    margin: 3rem 0;
+    outline: 0;
+    color: var(--text);
+    font: inherit;
+    font-size: 1rem;
 }
+.search input::placeholder { color: var(--text-muted); }
+.search input::-webkit-search-cancel-button { display: none; }
+.search kbd {
+    font-family: inherit;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+.sidebar-nav { padding-left: 0.5rem; }
+.nav-group + .nav-group { margin-top: 2rem; }
+.nav-group h5 {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+    font-weight: 400;
+    color: var(--text-muted);
+}
+.nav-group ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.nav-group li + li { margin-top: 0.3rem; }
+.nav-group a {
+    display: block;
+    color: var(--nav);
+    text-decoration: none;
+    line-height: 1.5;
+    transition: color 0.15s;
+}
+.nav-group a:hover,
+.nav-group a.active { color: #fff; }
+
+.sidebar-foot {
+    display: flex;
+    gap: 1rem;
+    margin-top: 3rem;
+    padding-left: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+.sidebar-foot a { text-decoration: none; }
+.sidebar-foot a:hover { color: var(--text); }
+
+/* ------------------------------------------------------------------ */
+/* Content column                                                     */
+/* ------------------------------------------------------------------ */
+
+.content {
+    margin: 0 calc(var(--sidebar-w) + 3rem) 0 auto;
+    max-width: 76rem;
+    padding: 4.5rem 0 6rem clamp(2rem, 6vw, 7rem);
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4 {
+    color: var(--text);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    scroll-margin-top: 2rem;
+}
+.content h1 {
+    font-size: 2.6rem;
+    line-height: 1.15;
+    margin: 0 0 1.75rem;
+}
+.content h2 {
+    font-size: 1.75rem;
+    line-height: 1.25;
+    margin: 4rem 0 1.25rem;
+}
+.content h3 {
+    font-size: 1.25rem;
+    margin: 2.5rem 0 1rem;
+}
+.content h4 { font-size: 1rem; margin: 2rem 0 0.75rem; }
+
+.content p { margin: 0 0 1.4rem; }
+.content p.lead {
+    color: var(--text);
+    font-size: 1.15rem;
+}
+.content strong { color: var(--text); font-weight: 500; }
+
+.content a {
+    color: var(--text);
+    text-decoration: underline;
+    text-decoration-color: rgba(255, 255, 255, 0.45);
+    text-underline-offset: 0.2em;
+    text-decoration-thickness: 1px;
+}
+.content a:hover { text-decoration-color: #fff; }
+
+.content ul, .content ol { margin: 0 0 1.4rem; padding-left: 1.4rem; }
+.content li { margin-bottom: 0.35rem; }
+.content li::marker { color: var(--text-muted); }
+
+/* Section separators in markdown read as extra breathing room. */
+.content hr { border: 0; margin: 0; }
+
+.content-foot { margin-top: 3rem; }
+
+.content-foot {
+    margin-top: 6rem;
+    padding-top: 2rem;
+    border-top: 1px solid var(--border-soft);
+    font-size: 0.875rem;
+    color: var(--text-muted);
+}
+
+/* Pills beside headings: <span class="badge alpha">Alpha</span> */
+.badge {
+    display: inline-block;
+    padding: 0.15rem 0.75rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-body);
+    margin-left: 0.5rem;
+    vertical-align: 0.2em;
+    font-size: 1rem;
+    line-height: 1.5;
+    font-weight: 400;
+    letter-spacing: 0;
+}
+.badge.alpha {
+    background: var(--accent-bg);
+    color: var(--accent);
+}
+
+/* Bordered card, e.g. the download row on the installation page. */
+.card {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 1.25rem 1.5rem 1.25rem 1.25rem;
+    margin: 0 0 1.25rem;
+    border: 1px solid var(--border);
+    border-radius: 1.5rem;
+}
+.card img {
+    width: 4rem;
+    height: 4rem;
+    object-fit: contain;
+    flex: none;
+}
+.card-text { flex: 1; min-width: 0; line-height: 1.4; }
+.card-title { color: var(--text); font-size: 1.15rem; }
+.card-sub { color: var(--text-muted); }
+.content a.button {
+    flex: none;
+    padding: 0.55rem 1.4rem;
+    border-radius: 999px;
+    background: #ececec;
+    color: #111;
+    text-decoration: none;
+    font-weight: 500;
+    transition: background 0.15s;
+}
+.content a.button:hover { background: #fff; }
+
+/* Quiet bordered note. Raw HTML in markdown: div.callout > h4 + p. */
+.callout {
+    padding: 1.1rem 1.4rem;
+    margin: 0 0 1.75rem;
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+}
+.callout h4 { margin: 0 0 0.35rem; font-size: 1rem; }
+.callout p { margin: 0; }
 
 /* Tables (markdown-emitted; kramdown produces bare <table>). */
-main table {
+.content table {
     width: 100%;
     border-collapse: separate;
     border-spacing: 0;
-    border: 1px solid rgb(226 232 240);   /* slate-200 */
-    border-radius: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 1rem;
     overflow: hidden;
-    margin-bottom: 2rem;
-    font-size: 0.875rem;
+    margin: 0 0 2rem;
+    font-size: 0.925rem;
 }
-main thead { background: rgb(248 250 252); }   /* slate-50 */
-main th {
+.content th {
     text-align: left;
-    padding: 0.75rem 1.5rem;
-    font-size: 0.75rem;
+    padding: 0.75rem 1.25rem;
     font-weight: 500;
-    color: rgb(100 116 139);              /* slate-500 */
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-bottom: 1px solid rgb(226 232 240);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
 }
-main td {
-    padding: 0.75rem 1.5rem;
-    color: rgb(71 85 105);                /* slate-600 */
-    border-bottom: 1px solid rgb(226 232 240);
+.content td {
+    padding: 0.7rem 1.25rem;
+    border-bottom: 1px solid var(--border-soft);
+    vertical-align: top;
 }
-main tr:last-child td { border-bottom: 0; }
+.content tr:last-child td { border-bottom: 0; }
 
-/* Markdown-emitted bare <pre> code blocks — Dracula dark card,
-   same chrome as the inline .code-block wrapper used elsewhere. */
-main pre {
-    background-color: #282a36;            /* Dracula Background */
-    border: 1px solid #44475a;            /* Dracula Selection */
-    border-radius: 0.5rem;
-    padding: 1.25rem;
+/* Inline code. */
+.content :is(p, li, td, th, h1, h2, h3, h4) code {
+    font-size: 0.85em;
+    padding: 0.12em 0.4em;
+    border-radius: 0.35rem;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text);
+}
+
+/* Code blocks. */
+.content pre {
+    margin: 0 0 1.75rem;
+    padding: 1.25rem 1.4rem;
     overflow-x: auto;
-    margin-bottom: 1.5rem;
+    background: var(--surface);
+    border: 1px solid var(--border-soft);
+    border-radius: 1rem;
     font-size: 0.875rem;
-    line-height: 1.625;
-    color: #f8f8f2;                       /* Dracula Foreground */
+    line-height: 1.65;
+    color: #e6e6e6;
 }
-/* Reset for <pre> nested inside the existing .code-block wrapper, so
-   the wrapper's chrome stays the source of truth there. */
-main .code-block pre {
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-    padding: 0;
-    margin-bottom: 0;
-}
-
-/* Markdown-emitted inline <code> — Rouge tags it .highlighter-rouge;
-   style those plus any bare <code> in prose. The existing HTML
-   reference uses inline Tailwind utilities producing the same look. */
-main :is(p, li, td, th, h1, h2, h3, h4) code.highlighter-rouge,
-main :is(p, li, td, th, h1, h2, h3, h4) > code {
-    font-size: 0.875rem;
-    background: rgb(241 245 249);          /* slate-100 */
-    padding: 0.125rem 0.25rem;
-    border-radius: 0.25rem;
-    color: rgb(219 39 119);                /* pink-600 */
-    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-}
+.content pre code { background: none; padding: 0; font-size: inherit; color: inherit; }
+/* Rouge wraps fenced blocks in div.highlight; keep the <pre> as the card. */
+.content div.highlight, .content div.highlighter-rouge { background: none; }
 
 /* ------------------------------------------------------------------ */
-/* Prism syntax highlighting for `language-jam` code blocks.          */
-/* Dracula palette per https://draculatheme.com/spec — matches the    */
-/* .syn-* classes used by hand-written code blocks on the tour page,  */
-/* so dark code looks the same whether emitted by Prism or by inline  */
-/* HTML spans.                                                        */
-/* Token names follow Prism's standard conventions; see jam-prism.js. */
+/* Prism tokens for `language-jam` (see jam-prism.js). Dracula hues,   */
+/* softened a touch to sit on the near-black background.              */
 /* ------------------------------------------------------------------ */
 
-main code[class*="language-"],
-main pre[class*="language-"] {
-    color: #f8f8f2;                       /* Dracula Foreground */
-    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+.content .token.comment        { color: #6b7394; font-style: italic; }
+.content .token.string,
+.content .token.string .token.escape { color: #e9e59a; }
+.content .token.number,
+.content .token.boolean        { color: #ffb37a; }
+.content .token.keyword,
+.content .token.intrinsic,
+.content .token.operator       { color: #ff86c8; }
+.content .token.builtin        { color: #8fdcf0; }
+.content .token.function       { color: #7ee89a; }
+.content .token.punctuation    { color: #bdbdbd; }
+
+/* ------------------------------------------------------------------ */
+/* Mobile                                                             */
+/* ------------------------------------------------------------------ */
+
+.topbar { display: none; }
+
+@media (max-width: 960px) {
+    .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.75rem 1rem;
+        background: rgba(17, 17, 17, 0.9);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border-soft);
+    }
+    .topbar-logo img { width: 2.75rem; height: 2.75rem; }
+    .topbar-menu {
+        padding: 0.5rem;
+        margin-right: -0.5rem;
+        background: none;
+        border: 0;
+        color: var(--nav);
+        cursor: pointer;
+    }
+    .topbar-menu svg { width: 1.5rem; height: 1.5rem; display: block; }
+
+    .sidebar {
+        top: 4.1rem;
+        z-index: 10;
+        width: 100%;
+        padding: 1.5rem 1rem 2rem;
+        background: var(--bg);
+        display: none;
+    }
+    .sidebar-logo { display: none; }
+    .nav-open .sidebar { display: block; }
+    .nav-open { overflow: hidden; }
+
+    .content {
+        margin: 0;
+        padding: 2.5rem 1rem 4rem;
+    }
+    .content h1 { font-size: 2.1rem; }
+    .content h2 { font-size: 1.5rem; margin-top: 3rem; scroll-margin-top: 5.5rem; }
+    .content h3 { scroll-margin-top: 5.5rem; }
+
+    .card { flex-wrap: wrap; border-radius: 1.25rem; }
+    .card img { width: 3.25rem; height: 3.25rem; }
+    .content a.button { width: 100%; text-align: center; }
 }
-
-main pre[class*="language-"] {
-    background-color: #282a36;            /* Dracula Background */
-    border: 1px solid #44475a;            /* Dracula Selection */
-    border-radius: 0.5rem;
-    padding: 1.25rem;
-    overflow-x: auto;
-    margin-bottom: 1.5rem;
-    font-size: 0.875rem;
-    line-height: 1.625;
-}
-
-/* Spec mapping (https://draculatheme.com/spec § 2):
-   keywords/control/modifiers → Pink; functions → Green; types → Cyan;
-   strings + escape sequences → Yellow; numbers/booleans/constants →
-   Orange; comments → Comment (#6272A4, italic). Operators and
-   punctuation fall back to Pink and Foreground respectively. */
-
-main .token.comment        { color: #6272a4; font-style: italic; }    /* Comment */
-main .token.string         { color: #f1fa8c; }                         /* Yellow */
-main .token.string .escape,
-main .token.string .token.escape { color: #f1fa8c; }                   /* Yellow — escapes share string color */
-main .token.number,
-main .token.boolean        { color: #ffb86c; }                         /* Orange */
-main .token.keyword        { color: #ff79c6; }                         /* Pink */
-main .token.builtin        { color: #8be9fd; }                         /* Cyan — types */
-main .token.function       { color: #50fa7b; }                         /* Green */
-main .token.intrinsic      { color: #ff79c6; }                         /* Pink — @sizeOf, @alignOf */
-main .token.operator       { color: #ff79c6; }                         /* Pink */
-main .token.punctuation    { color: #f8f8f2; }                         /* Foreground */
