@@ -1,0 +1,12 @@
+// A fn value passed for a fn-typed parameter must have that fn type (calling
+// through the wrong one used the wrong ABI and crashed).
+// expect-error: type mismatch in argument `g`: the fn value has a different fn type than the slot
+
+const S = struct { a: i64, b: i64, c: i64 };
+fn mk(x: i32) S { return S { a: x as i64, b: 2, c: 3 }; }
+fn use(g: fn(i32) i32) i32 { return g(4); }
+
+fn main() {
+    var f: fn(i32) S = mk;
+    var r: i32 = use(f);
+}

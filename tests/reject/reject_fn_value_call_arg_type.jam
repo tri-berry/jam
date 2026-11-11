@@ -1,0 +1,11 @@
+// A call through a fn value checks argument types (a scalar for a struct
+// param used to crash LLVM).
+// expect-error: type mismatch in `argument 1`: the fn type wants a different type
+
+const P = struct { a: i64, b: i64, c: i64 };
+fn sum(p: P) i64 { return p.a + p.b + p.c; }
+
+fn main() {
+    var g: fn(P) i64 = sum;
+    var r: i64 = g(5);
+}

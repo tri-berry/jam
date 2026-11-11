@@ -1,0 +1,9 @@
+// A named fn used as a typed fn value must match the fn type: this used to
+// compile, and every call through `f` used the wrong ABI.
+// expect-error: fn `g` does not match the expected function type: parameter 1 (`a`) has a different type
+
+fn g(a: u8) u8 { return a; }
+
+fn main() {
+    var f: fn(i32) i32 = g;
+}

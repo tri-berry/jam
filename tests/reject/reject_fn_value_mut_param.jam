@@ -1,0 +1,9 @@
+// A fn type has no param modes, so a call through it can't pass the
+// pointer a `mut` param needs.
+// expect-error: fn `bump` does not match the expected function type: parameter 1 (`x`) is `mut`, which a fn type can't express
+
+fn bump(x: mut i32) i32 { x = x + 1; return x; }
+
+fn main() {
+    var f: fn(i32) i32 = bump;
+}

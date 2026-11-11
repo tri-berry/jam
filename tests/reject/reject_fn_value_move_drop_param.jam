@@ -1,0 +1,14 @@
+// A fn type can't consume an argument: through a fn value the callee would
+// drop a `move` param while the caller still drops its own copy.
+// expect-error: fn `eat` does not match the expected function type: parameter 1 (`r`) is a `move` of a type with a drop, which a fn type can't express
+
+const R = struct {
+    n: i32,
+    cfn drop(self: mut Self) { }
+};
+
+fn eat(r: move R) i32 { return r.n; }
+
+fn main() {
+    var f: fn(R) i32 = eat;
+}

@@ -1,0 +1,35 @@
+// Fn values across modules: an imported fn by address (`m.twice`), with a
+// by-value struct param (through the C-ABI thunk), a module naming its own fn,
+// and a fn-typed field of an imported struct whose param type is that
+// module's `P` while this module has a different `P` of its own.
+
+const m = import("mod_fn_values");
+
+// Same name as mod_fn_values.P, different layout.
+const P = struct { x: i32 };
+
+fn first(p: m.P) i64 { return p.a * 100; }
+
+tfn importedFnByAddress() {
+    var f: fn(i32) i32 = m.twice;
+    assert(f(21), 42);
+}
+
+tfn importedFnWithStructParam() {
+    var g: fn(m.P) i64 = m.sum;
+    assert(g(m.P { a: 1, b: 2, c: 3 }), 6);
+}
+
+tfn moduleNamesItsOwnFn() {
+    assert(m.applyLocal(5), 10);
+    assert(m.twiceAddr(), (m.twice as u64));
+}
+
+tfn fnFieldOfImportedStruct() {
+    var h: m.H = m.H { f: first };
+    assert(h.f(m.P { a: 4, b: 0, c: 0 }), 400);
+    h.f = m.sum;
+    assert(m.callH(h), 6);
+    var mine: P = P { x: 7 };
+    assert(mine.x, 7);
+}

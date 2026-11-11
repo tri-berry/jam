@@ -1,0 +1,8 @@
+// A non-`pub` fn can't be taken by address through an import handle.
+// expect-error: symbol `hidden` is not exported from module `mod_fn_private`
+
+const m = import("mod_fn_private");
+
+fn main() {
+    var f: fn(i32) i32 = m.hidden;
+}

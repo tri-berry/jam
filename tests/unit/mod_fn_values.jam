@@ -1,0 +1,18 @@
+// Helper module for test_fn_values_cross_module.jam: its own `P`, a struct
+// with a fn-typed field over that `P`, and fns taken by address from outside
+// and from inside the module.
+
+pub const P = struct { a: i64, b: i64, c: i64 };
+pub const H = struct { f: fn(P) i64 };
+
+pub fn twice(x: i32) i32 { return x * 2; }
+pub fn sum(p: P) i64 { return p.a + p.b + p.c; }
+
+pub fn applyLocal(x: i32) i32 {
+    var f: fn(i32) i32 = twice;
+    return f(x);
+}
+
+pub fn twiceAddr() u64 { return twice as u64; }
+
+pub fn callH(h: H) i64 { return h.f(P { a: 1, b: 2, c: 3 }); }

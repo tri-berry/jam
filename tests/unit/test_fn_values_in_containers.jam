@@ -1,0 +1,23 @@
+// A fn named as a `move` argument isn't a binding that moves: it can be
+// passed twice (the move check used to report "use of moved binding"), and
+// fn values round-trip through a Vec.
+const { Vec } = import("std/collections");
+
+fn dbl(x: i32) i32 { return x * 2; }
+fn inc(x: i32) i32 { return x + 1; }
+fn take(f: move fn(i32) i32) i32 { return f(1); }
+
+tfn fnNamePassedToMoveTwice() {
+    assert(take(dbl) + take(dbl), 4);
+}
+
+tfn vecOfFnValues() {
+    var v = Vec(fn(i32) i32).empty();
+    v.push(dbl);
+    v.push(dbl);
+    v.push(inc);
+    var f: fn(i32) i32 = v.at(1);
+    var g: fn(i32) i32 = v.at(2);
+    assert(f(21), 42);
+    assert(g(41), 42);
+}

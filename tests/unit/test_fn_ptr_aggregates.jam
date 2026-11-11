@@ -1,0 +1,98 @@
+// Fn values with by-value aggregates in their signature. Calls through a
+// fn value use the C ABI, but a plain Jam fn takes aggregates by pointer,
+// so taking its address used to hand out the Jam-ABI function: a struct
+// argument arrived as a garbage pointer (segfault). The address is now an
+// internal C-ABI wrapper over the fn.
+
+const { assert } = import("test");
+
+const P = struct { a: i32, b: i32 };
+const Big = struct { a: i64, b: i64, c: i64, d: i64 };
+const D2 = struct { x: f64, y: f64 };
+
+fn sumP(p: P) i32 { return p.a * 10 + p.b; }
+fn mkP(a: i32) P { return P { a: a, b: a + 1 }; }
+fn sumBig(g: Big, k: i64) i64 { return g.a + g.b + g.c + g.d + k; }
+fn mkBig(x: i64) Big { return Big { a: x, b: x + 1, c: x + 2, d: x + 3 }; }
+fn halfD(d: D2) D2 { return D2 { x: d.x / 2.0, y: d.y / 2.0 }; }
+fn twice(a: i32) i32 { return a * 2; }
+
+fn applyP(f: fn(P) i32, p: P) i32 { return f(p); }
+
+const Ops = struct { sum: fn(P) i32, mk: fn(i32) P };
+
+tfn structParamThroughFnValue() {
+    var f: fn(P) i32 = sumP;
+    var p: P = P { a: 3, b: 4 };
+    assert(f(p), 34);
+    assert(applyP(sumP, p), 34);
+}
+
+tfn structReturnThroughFnValue() {
+    var f: fn(i32) P = mkP;
+    var p: P = f(5);
+    assert(p.a, 5);
+    assert(p.b, 6);
+}
+
+tfn memoryClassThroughFnValue() {
+    var mk: fn(i64) Big = mkBig;
+    var sum: fn(Big, i64) i64 = sumBig;
+    var g: Big = mk(10);
+    assert(g.d, 13);
+    assert(sum(g, 100), 146);
+}
+
+tfn floatStructThroughFnValue() {
+    var f: fn(D2) D2 = halfD;
+    var d: D2 = f(D2 { x: 3.0, y: 5.0 });
+    var ok: u32 = 0;
+    if (d.x == 1.5 && d.y == 2.5) { ok = 1; }
+    assert(ok, 1);
+}
+
+tfn fnValuesInStructFields() {
+    var ops: Ops = Ops { sum: sumP, mk: mkP };
+    var p: P = ops.mk(7);
+    assert(ops.sum(p), 78);
+}
+
+tfn scalarFnValueUnchanged() {
+    var f: fn(i32) i32 = twice;
+    assert(f(21), 42);
+}
+
+tfn callCOnPlainFnAddress() {
+    var p: P = P { a: 1, b: 2 };
+    assert(@callC(i32, sumP as u64, p), 12);
+    var q: P = @callC(P, mkP as u64, 8 as i32);
+    assert(q.b, 9);
+}
+
+// Zero-sized params have no C argument, and arrays pass as pointers: the
+// call through the fn value must lower them the way the wrapper does.
+const E = struct {};
+fn afterEmpty(e: E, p: P) i32 { return p.a + p.b; }
+fn sumArr(a: [4]u32, p: P) u32 { return a[0] + a[3] + (p.b as u32); }
+fn mkArr(x: u32) [4]u32 { return [x, x + 1, x + 2, x + 3]; }
+fn isOn(b: bool, p: P) i32 { if (b) { return p.a; } return 0; }
+
+tfn emptyStructParamThroughFnValue() {
+    var f: fn(E, P) i32 = afterEmpty;
+    assert(f(E {}, P { a: 30, b: 4 }), 34);
+}
+
+tfn arrayParamAndReturnThroughFnValue() {
+    var s: fn([4]u32, P) u32 = sumArr;
+    var a: [4]u32 = [1, 2, 3, 4];
+    assert(s(a, P { a: 0, b: 4 }), 9);
+    var m: fn(u32) [4]u32 = mkArr;
+    var r: [4]u32 = m(5);
+    assert(r[3], 8);
+}
+
+tfn boolBesideStructThroughFnValue() {
+    var f: fn(bool, P) i32 = isOn;
+    assert(f(true, P { a: 6, b: 0 }), 6);
+    assert(f(false, P { a: 6, b: 0 }), 0);
+}

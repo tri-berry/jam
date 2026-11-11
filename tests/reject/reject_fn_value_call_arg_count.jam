@@ -1,0 +1,10 @@
+// A call through a fn value must pass exactly the arguments its type takes
+// (an extra one used to be silently dropped).
+// expect-error: call through a fn value passes 2 argument(s), its type takes 1
+
+fn inc(x: i32) i32 { return x + 1; }
+
+fn main() {
+    var f: fn(i32) i32 = inc;
+    var r: i32 = f(1, 2);
+}
