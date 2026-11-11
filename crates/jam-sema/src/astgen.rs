@@ -24,6 +24,9 @@ use crate::jir::{JirBlockRef, JirFunction, JirInst, JirRef, JirTag, NO_JIR_BLOCK
 use crate::jir_codegen::{jir_declare_prototype, jir_define_body};
 use crate::mangling::mangled_function_name;
 
+/// A name a scope bound, and the binding (slot, type) it shadowed.
+type ShadowSave = (String, Option<(JirRef, TypeIdx)>);
+
 /// A drop-bearing binding tracked for scope-exit destruction. The mangled
 /// drop symbol is re-resolved at emission time by `emit_drop_in_place`, so it
 /// isn't cached here.
@@ -69,6 +72,10 @@ struct AstGenCtx<'a, 'ctx> {
     /// `astgen_var_decl` only consults the top frame, so sibling blocks
     /// (`if { const op = ...; }` twice at the same level) don't trip it.
     local_scopes: Vec<std::collections::HashSet<String>>,
+    /// Per lexical scope (parallel to `local_scopes`): the binding each name
+    /// declared in it shadowed (`None` = none), restored when the scope ends
+    /// so an inner block's `var x` stops being visible after the block.
+    shadow_saves: Vec<Vec<ShadowSave>>,
     /// Function-local `comp const` / `comp var` bindings — compile-time values
     /// inlined at use sites, never given a runtime slot.
     comp_scope: crate::comptime::ComptimeScope,
@@ -81,6 +88,16 @@ struct AstGenCtx<'a, 'ctx> {
     /// bodies). `comp if` arms do NOT count: their statements lower inline and
     /// execute unconditionally.
     runtime_cond_depth: u32,
+    /// The target of the `as` cast whose operand is being lowered. That
+    /// target is only a width hint for the operand: an int literal reached
+    /// through it that doesn't fit (`(FLAGS >> 8) as u8`, FLAGS = 0x1234)
+    /// settles at its natural width and the cast truncates, rather than
+    /// failing the literal range check.
+    cast_hint: TypeIdx,
+    /// While a module const's init is lowered at a use site: the use node and
+    /// the const's name, so diagnostics land at the use (the init may sit in
+    /// another file) and name the const.
+    const_anchor: Option<(NodeIdx, String)>,
     /// Recoverable diagnostics collected while still walking the body (append
     /// the error + emit a `Poison` and keep going, so independent statements
     /// each report their own miss). Flushed in source order when the body
@@ -92,7 +109,14 @@ struct AstGenCtx<'a, 'ctx> {
 /// skip-and-continue loops like struct-literal fields, where the offending
 /// item is simply dropped.
 fn append_error_here(gctx: &mut AstGenCtx, message: String) {
-    let prefixed = fail_node(gctx, gctx.current_node, &message);
+    let prefixed = match &gctx.const_anchor {
+        Some((node, name)) => fail_node(
+            gctx,
+            *node,
+            &format!("{message} (the value of const `{name}`)"),
+        ),
+        None => fail_node(gctx, gctx.current_node, &message),
+    };
     gctx.recovered.push(prefixed);
 }
 
@@ -147,9 +171,46 @@ fn prefix_hard_error(gctx: &AstGenCtx, e: String) -> String {
 /// Append `inst` to the function's instruction array AND the current block.
 fn emit(gctx: &mut AstGenCtx, mut inst: JirInst) -> JirRef {
     inst.src_line = gctx.ctx.node_store.get_line(gctx.current_node);
+    inst.ty = concrete_generic_ty(gctx, inst.ty);
     let r = gctx.jfn.push_inst(inst);
     gctx.jfn.get_block_mut(gctx.current_block).insts.push(r);
     r
+}
+
+/// Inside an instantiated generic body, a generic instance type written in
+/// terms of the parameters (`Pair(T)`, `*mut Vec(T)`) becomes the concrete
+/// instance (`Pair__u8`) before it lands in the JIR. Codegen runs later with
+/// no substitution active, so a literal `Pair(T)` would resolve to whichever
+/// instance was cached first: `G(u8).o2()` built a `Pair__i64`.
+fn concrete_generic_ty(gctx: &AstGenCtx, ty: TypeIdx) -> TypeIdx {
+    if ty.is_none() || !gctx.ctx.has_active_subst() {
+        return ty;
+    }
+    let k = gctx.ctx.type_pool.get(ty);
+    match k.kind {
+        TypeKind::GenericCall => {
+            // Only a type that names this instantiation's parameters; one
+            // the frame doesn't bind (another scope's `T`) stays literal.
+            let s = gctx.ctx.apply_current_subst(ty);
+            if s == ty {
+                return ty;
+            }
+            match gctx.ctx.resolve_generic_call_instantiate(s) {
+                Ok(r) if !r.is_none() => r,
+                _ => ty,
+            }
+        }
+        TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Slice | TypeKind::Array => {
+            let e = concrete_generic_ty(gctx, TypeIdx::new(k.a));
+            if e == TypeIdx::new(k.a) {
+                return ty;
+            }
+            let mut nk = k;
+            nk.a = e.raw();
+            gctx.ctx.type_pool.intern(nk)
+        }
+        _ => ty,
+    }
 }
 
 /// Append an Alloca to the function's ENTRY block (block 1) regardless of the
@@ -160,6 +221,7 @@ fn emit(gctx: &mut AstGenCtx, mut inst: JirInst) -> JirRef {
 /// entry allocas rather than after the entry block's `Br`.
 fn emit_alloca_hoisted(gctx: &mut AstGenCtx, mut inst: JirInst) -> JirRef {
     inst.src_line = gctx.ctx.node_store.get_line(gctx.current_node);
+    inst.ty = concrete_generic_ty(gctx, inst.ty);
     let r = gctx.jfn.push_inst(inst);
     let mut insert_at = gctx.jfn.get_block(1).insts.len();
     while insert_at > 0 {
@@ -183,6 +245,7 @@ fn str_at(gctx: &AstGenCtx, id: u32) -> String {
 fn push_drop_scope(gctx: &mut AstGenCtx) {
     gctx.drop_scopes.push(Vec::new());
     gctx.local_scopes.push(std::collections::HashSet::new());
+    gctx.shadow_saves.push(Vec::new());
     // Comp bindings are lexically scoped too: an inner block's `comp const x`
     // shadows an outer one, and the outer value is restored at block exit.
     gctx.comp_scope.push();
@@ -213,17 +276,21 @@ fn emit_drops_through_scope(gctx: &mut AstGenCtx, target_idx: usize) {
 /// filtered copies; does not mutate the scope stack, so other return paths still
 /// drop the local.
 fn emit_drops_through_scope_moved_out(gctx: &mut AstGenCtx, target_idx: usize, moved_var: &str) {
+    // Only the innermost binding of `moved_var` moves out: scopes are walked
+    // innermost first and, within one, the latest binding first. A shadowed
+    // outer binding is still dropped.
+    let slot = gctx.locals.get(moved_var).copied();
     let mut i = gctx.drop_scopes.len();
+    let mut removed = false;
     while i > target_idx {
-        let orig = gctx.drop_scopes[i - 1].clone();
-        let mut filtered = Vec::with_capacity(orig.len());
-        let mut removed = false;
-        for d in orig {
-            if !removed && d.var_name == moved_var {
-                removed = true;
-                continue;
-            }
-            filtered.push(d);
+        let mut filtered = gctx.drop_scopes[i - 1].clone();
+        if !removed
+            && let Some(pos) = filtered
+                .iter()
+                .rposition(|d| Some(d.slot) == slot || (slot.is_none() && d.var_name == moved_var))
+        {
+            filtered.remove(pos);
+            removed = true;
         }
         emit_drops(gctx, &filtered);
         i -= 1;
@@ -242,8 +309,39 @@ fn pop_drop_scope_emitting(gctx: &mut AstGenCtx) {
     }
     gctx.drop_scopes.pop();
     gctx.local_scopes.pop();
+    if let Some(saves) = gctx.shadow_saves.pop() {
+        for (name, prior) in saves.into_iter().rev() {
+            match prior {
+                Some((slot, ty)) => {
+                    gctx.locals.insert(name.clone(), slot);
+                    gctx.local_types.insert(name, ty);
+                }
+                None => {
+                    gctx.locals.remove(&name);
+                    gctx.local_types.remove(&name);
+                }
+            }
+        }
+    }
     gctx.comp_scope.pop();
     gctx.comp_bind_info.pop();
+}
+
+/// Bind a `var`/`const` local in the innermost scope, remembering what it
+/// shadows so the scope's end restores it.
+fn bind_scoped_local(gctx: &mut AstGenCtx, name: &str, slot: JirRef, ty: TypeIdx) {
+    let prior = gctx
+        .locals
+        .get(name)
+        .map(|&s| (s, gctx.local_types.get(name).copied().unwrap_or(TypeIdx::NONE)));
+    if let Some(saves) = gctx.shadow_saves.last_mut() {
+        saves.push((name.to_string(), prior));
+    }
+    gctx.locals.insert(name.to_string(), slot);
+    gctx.local_types.insert(name.to_string(), ty);
+    if let Some(frame) = gctx.local_scopes.last_mut() {
+        frame.insert(name.to_string());
+    }
 }
 
 /// Find the binding-info record for an explicit comp binding, innermost frame
@@ -260,13 +358,27 @@ fn lookup_comp_binding_info(gctx: &AstGenCtx, name: &str) -> Option<CompBindingI
 /// from its drop scope — ownership has moved to the surrounding owner (a struct
 /// field, an array element, a `move` arg), which now runs the drop.
 fn consume_moved_variable(gctx: &mut AstGenCtx, expr_idx: NodeIdx) {
+    if let Some(slot) = moved_source_slot(gctx, expr_idx) {
+        consume_moved_slot(gctx, slot);
+    }
+}
+
+/// The slot of the local a bare-variable expression names, if any. The
+/// binding the name denotes here is the one a move consumes: not a shadowed
+/// outer binding of the same name, and nothing when the name isn't a visible
+/// local (a module const read inside a const's init hides the locals).
+fn moved_source_slot(gctx: &AstGenCtx, expr_idx: NodeIdx) -> Option<JirRef> {
     let n = *gctx.ctx.node_store.get(expr_idx);
     if n.tag != AstTag::Variable {
-        return;
+        return None;
     }
-    let name = str_at(gctx, n.lhs);
-    for scope in gctx.drop_scopes.iter_mut() {
-        if let Some(pos) = scope.iter().position(|d| d.var_name == name) {
+    gctx.locals.get(&str_at(gctx, n.lhs)).copied()
+}
+
+/// Stop tracking `slot`'s drop: its value moved out.
+fn consume_moved_slot(gctx: &mut AstGenCtx, slot: JirRef) {
+    for scope in gctx.drop_scopes.iter_mut().rev() {
+        if let Some(pos) = scope.iter().rposition(|d| d.slot == slot) {
             scope.remove(pos);
             return;
         }
@@ -359,10 +471,11 @@ fn detect_return_move(gctx: &AstGenCtx, val_idx: NodeIdx) -> Option<String> {
         return None;
     }
     let name = str_at(gctx, n.lhs);
+    let slot = *gctx.locals.get(&name)?;
     if gctx
         .drop_scopes
         .iter()
-        .any(|s| s.iter().any(|d| d.var_name == name))
+        .any(|s| s.iter().any(|d| d.slot == slot))
     {
         Some(name)
     } else {
@@ -629,13 +742,26 @@ fn emit_enum_payload_drops(gctx: &mut AstGenCtx, ptr: JirRef, ty: TypeIdx) {
                         ..Default::default()
                     },
                 );
-                let field_ptr = emit(
+                let byte_ptr = emit(
                     gctx,
                     JirInst {
                         tag: JirTag::IndexAddr,
                         a: pay_area,
                         b: off_ref,
                         ty: u8_ptr,
+                        ..Default::default()
+                    },
+                );
+                // Retype to the payload's own pointer type: a struct payload's
+                // field drops address its fields through this pointer (as
+                // `*u8` that built an `i8` GEP and crashed).
+                let pt_ptr = gctx.ctx.type_pool.intern_ptr_single(*pt);
+                let field_ptr = emit(
+                    gctx,
+                    JirInst {
+                        tag: JirTag::BitCast,
+                        a: byte_ptr,
+                        ty: pt_ptr,
                         ..Default::default()
                     },
                 );
@@ -1226,6 +1352,25 @@ fn astgen_expr(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result
     if node.is_none() {
         return Err("astgen: null expression node".into());
     }
+    // An `as` cast's width hint covers its operand's arithmetic, not the
+    // arguments of a call inside it: `f(K) as u8` must check `K` against
+    // `f`'s parameter like a plain `f(K)` does.
+    let tag = gctx.ctx.node_store.get(node).tag;
+    if !gctx.cast_hint.is_none()
+        && matches!(
+            tag,
+            AstTag::Call | AstTag::TypeMethodCall | AstTag::AtCall | AstTag::Index
+        )
+    {
+        let saved = std::mem::replace(&mut gctx.cast_hint, TypeIdx::NONE);
+        let r = astgen_expr_node(gctx, node, expected);
+        gctx.cast_hint = saved;
+        return r;
+    }
+    astgen_expr_node(gctx, node, expected)
+}
+
+fn astgen_expr_node(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result<JirRef, String> {
     let n = *gctx.ctx.node_store.get(node);
     gctx.current_node = node;
     match n.tag {
@@ -1259,7 +1404,7 @@ fn astgen_expr(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result
         AstTag::ArrayRepeat => astgen_array_repeat(gctx, &n, expected),
         AstTag::Index => astgen_index(gctx, &n),
         AstTag::MatchNode => astgen_match(gctx, &n, expected),
-        AstTag::MemberAccess => astgen_member_access(gctx, &n),
+        AstTag::MemberAccess => astgen_member_access(gctx, &n, expected),
         AstTag::Deref => astgen_deref(gctx, &n),
         AstTag::AddressOf => astgen_address_of(gctx, &n),
         // Caution: slice lowering on the large std files
@@ -1306,6 +1451,20 @@ fn astgen_expr(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result
             TypeIdx::NONE,
         )),
         other => Err(format!("astgen: node {other:?} not yet ported")),
+    }
+}
+
+/// Does integer literal `n` fit a `width`-bit int of signedness `signed`?
+fn int_lit_fits(n: &AstNode, width: u16, signed: bool) -> bool {
+    let val = (n.lhs as u64) | ((n.rhs as u64) << 32);
+    if n.flags & 1 != 0 {
+        // No 64-bit int holds a negative magnitude above 2^63.
+        if val > 1u64 << 63 {
+            return false;
+        }
+        comp_int_fits((val as i64).wrapping_neg() as u64, true, width, signed)
+    } else {
+        comp_int_fits(val, false, width, signed)
     }
 }
 
@@ -1385,9 +1544,23 @@ fn astgen_number_lit(
             }
             resolved = target;
         }
-        if gctx.ctx.type_pool.get(resolved).kind == TypeKind::Int {
-            inst.ty = resolved;
-            return Ok(emit(gctx, inst));
+        let rk = gctx.ctx.type_pool.get(resolved);
+        if rk.kind == TypeKind::Int {
+            // Out of range for the destination: reject rather than truncate
+            // (`var b: u8 = 70000` used to store 112).
+            if int_lit_fits(n, rk.a as u16, rk.b != 0) {
+                inst.ty = resolved;
+                return Ok(emit(gctx, inst));
+            }
+            // Only a cast's width hint: settle at smallest fit below.
+            if expected != gctx.cast_hint {
+                return Err(format!(
+                    "integer literal {}{val} does not fit `{}{}`",
+                    if is_neg { "-" } else { "" },
+                    if rk.b != 0 { "i" } else { "u" },
+                    rk.a
+                ));
+            }
         }
         // Int literal into a float destination stays permissive — falls through
         // to smallest-fit, and the consumer emits the SIToFP / UIToFP.
@@ -1444,6 +1617,269 @@ fn astgen_string_lit(
     ))
 }
 
+/// The type a module const's value is lowered at, at a use site expecting
+/// `expected`. An untyped const (`const BASE = 100`) takes the use site's
+/// type, like the literal it spells; otherwise it would settle at its
+/// smallest fit (u8) and be stored at that width into a wider slot. A typed
+/// const keeps its declared type (a mismatch is then reported at the use),
+/// except a `comp const`, whose folded value narrows to the use site first.
+fn const_use_type(
+    mc: &crate::codegen_context::ModuleConstInfo,
+    expected: TypeIdx,
+    is_comp: bool,
+) -> TypeIdx {
+    if expected.is_none() || (!is_comp && !mc.declared_type.is_none()) {
+        mc.declared_type
+    } else {
+        expected
+    }
+}
+
+/// Why `f`'s signature differs from the `Fn` type `fn_ty`, or None when they
+/// match. A named fn used as a typed fn pointer used to take the expected
+/// type on trust, so `var f: fn(i32) i32 = g` with `g(a: u8) u8` compiled
+/// and every call through `f` used the wrong ABI.
+fn fn_sig_mismatch(gctx: &AstGenCtx, f: &FunctionAST, fn_ty: TypeIdx) -> Option<String> {
+    let k = gctx.ctx.type_pool.get(fn_ty);
+    let want_params = gctx.ctx.type_pool.fn_params_at(k.b);
+    let want_ret = TypeIdx::new(k.a);
+    if f.is_var_args {
+        return Some("it is variadic".into());
+    }
+    if f.args.len() != want_params.len() {
+        return Some(format!(
+            "it takes {} parameter(s), the type has {}",
+            f.args.len(),
+            want_params.len()
+        ));
+    }
+    // `a` is spelled in `f`'s module, `b` (the fn type) at the use site.
+    let same = |a: TypeIdx, b: TypeIdx| {
+        let void = |t: TypeIdx| t.is_none() || t == builtin::VOID;
+        if void(a) || void(b) {
+            return void(a) && void(b);
+        }
+        let a = gctx.ctx.requalify_type(a, &f.module_path);
+        types_match(gctx.ctx, a, b)
+    };
+    for (i, (p, &w)) in f.args.iter().zip(&want_params).enumerate() {
+        // A fn type has no param modes: a call through it passes values, so
+        // a `mut` param (a pointer to the caller's storage) can't be reached.
+        if p.mode == jam_core::param_mode::ParamMode::Mut {
+            return Some(format!(
+                "parameter {} (`{}`) is `mut`, which a fn type can't express",
+                i + 1,
+                p.name
+            ));
+        }
+        // Nor can it consume an argument: the callee would drop a `move`
+        // param while the caller still drops its own copy.
+        if p.mode == jam_core::param_mode::ParamMode::Move && gctx.ctx.type_needs_drop(p.ty) {
+            return Some(format!(
+                "parameter {} (`{}`) is a `move` of a type with a drop, which a fn type can't express",
+                i + 1,
+                p.name
+            ));
+        }
+        if !same(p.ty, w) {
+            return Some(format!(
+                "parameter {} (`{}`) has a different type",
+                i + 1,
+                p.name
+            ));
+        }
+    }
+    if !same(f.return_type, want_ret) {
+        return Some("the return type differs".into());
+    }
+    None
+}
+
+/// A function named as a value (`f`, `lib.f`): a typed fn pointer when the
+/// use site expects a `Fn`, else the legacy raw u64 address. The `FnRef`
+/// carries the function's symbol (`m.f` for an imported or module-local fn),
+/// which is what codegen declared. Generic fns have no body to point at.
+fn fn_value_ref(
+    gctx: &mut AstGenCtx,
+    f: &FunctionAST,
+    shown: &str,
+    expected: TypeIdx,
+) -> Result<JirRef, String> {
+    if f.is_generic() {
+        return Ok(recover_here(
+            gctx,
+            format!("cannot take address of generic fn `{shown}`"),
+            TypeIdx::NONE,
+        ));
+    }
+    if f.is_comp_time_fn {
+        return Err(format!("cannot take address of comptime fn `{shown}`"));
+    }
+    let expect_fn = !expected.is_none() && gctx.ctx.type_pool.get(expected).kind == TypeKind::Fn;
+    if expect_fn && let Some(why) = fn_sig_mismatch(gctx, f, expected) {
+        return Err(format!(
+            "fn `{shown}` does not match the expected function type: {why}"
+        ));
+    }
+    let symbol = mangled_function_name(f, &gctx.ctx.type_pool, &gctx.ctx.string_pool);
+    let sid = gctx.ctx.string_pool.intern(symbol.as_bytes());
+    let ty = if expect_fn { expected } else { builtin::U64 };
+    Ok(emit(
+        gctx,
+        JirInst {
+            tag: JirTag::FnRef,
+            a: sid.raw(),
+            ty,
+            ..Default::default()
+        },
+    ))
+}
+
+/// A module const named by a bare `name`: the scope module's own (see
+/// `CodegenContext::const_lookup_module`), one it destructured, or an entry
+/// const read from the entry. Never another module's const by its bare name.
+fn lookup_bare_const(
+    gctx: &AstGenCtx,
+    name: &str,
+) -> Option<crate::codegen_context::ModuleConstInfo> {
+    // The module's own const first (the entry's live under the bare key),
+    // then one it destructured.
+    let cm = gctx.ctx.const_lookup_module();
+    (!cm.is_empty())
+        .then(|| gctx.ctx.get_module_const(&format!("{cm}.{name}")))
+        .flatten()
+        .or_else(|| {
+            gctx.ctx
+                .get_module_const(name)
+                .filter(|mc| mc.module_path == cm)
+        })
+        .or_else(|| {
+            gctx.ctx
+                .destructured_module(name)
+                .and_then(|src| gctx.ctx.get_module_const(&format!("{src}.{name}")))
+        })
+}
+
+/// Fold a `comp const`'s init in the const's own module, so its bare names
+/// don't pick up the reader's same-named consts.
+fn fold_const_in_module(
+    gctx: &AstGenCtx,
+    mc: &crate::codegen_context::ModuleConstInfo,
+) -> crate::comptime::ComptimeValue {
+    gctx.ctx.push_body_module(mc.module_path.clone());
+    gctx.ctx.push_const_scope(mc.module_path.clone());
+    let v = gctx.ctx.fold_comptime_expr(mc.init_expr);
+    gctx.ctx.pop_const_scope();
+    gctx.ctx.pop_body_module();
+    v
+}
+
+/// Lower a module const's initializer at a use site. The init expression
+/// lives at the const's declaration (maybe in another file), so an error is
+/// anchored back at the use and names the const.
+fn lower_const_init(
+    gctx: &mut AstGenCtx,
+    mc: &crate::codegen_context::ModuleConstInfo,
+    expected: TypeIdx,
+    force_expected: bool,
+    name: &str,
+) -> Result<JirRef, String> {
+    let use_node = gctx.current_node;
+    let here = gctx.ctx.current_body_module();
+    let module = mc.module_path.as_str();
+    let switch = here != module;
+    // The slot type: the use site's (spelled in the caller's module) or the
+    // const's declared one (spelled in its own module). Pin either to its
+    // module before switching, so a bare `P` can't change meaning.
+    let want = if force_expected {
+        expected
+    } else {
+        const_use_type(mc, expected, false)
+    };
+    let want = if !switch || want.is_none() {
+        want
+    } else if want == expected && (force_expected || mc.declared_type.is_none()) {
+        gctx.ctx.requalify_type(want, &here)
+    } else {
+        gctx.ctx.requalify_type(want, module)
+    };
+    // An untyped const takes the use site's type, and its init is computed
+    // at that width: `K + K` with `K = 200` into a `u8` wrapped to 144. When
+    // the init folds at compile time, its true value must fit.
+    // (A plain literal init reports its own range error; inside an `as`
+    // cast the target is only a width hint and the cast truncates.)
+    let plain_literal = {
+        let n = *gctx.ctx.node_store.get(mc.init_expr);
+        n.tag == AstTag::NumberLit
+            || (n.tag == AstTag::UnaryOp
+                && gctx.ctx.node_store.get(NodeIdx::new(n.lhs)).tag == AstTag::NumberLit)
+    };
+    if mc.declared_type.is_none() && !plain_literal && want != gctx.cast_hint {
+        let wk = gctx.ctx.type_pool.get(resolve_for_cmp(gctx.ctx, want));
+        if wk.kind == TypeKind::Int
+            && let ComptimeValue::Int { bits, is_signed, .. } = fold_const_in_module(gctx, mc)
+            && !comp_int_fits(bits, is_signed, wk.a as u16, wk.b != 0)
+        {
+            let shown = if is_signed {
+                (bits as i64).to_string()
+            } else {
+                bits.to_string()
+            };
+            return Err(format!(
+                "the value of const `{name}` ({shown}) does not fit `{}`",
+                scalar_name(resolve_for_cmp(gctx.ctx, want))
+            ));
+        }
+    }
+    // Bare names in the init resolve in the const's module, and never to
+    // the caller's locals or comptime bindings.
+    if switch {
+        gctx.ctx.push_body_module(module.to_string());
+    }
+    gctx.ctx.push_const_scope(module.to_string());
+    let saved_locals = std::mem::take(&mut gctx.locals);
+    let saved_local_types = std::mem::take(&mut gctx.local_types);
+    let saved_comp_scope = std::mem::replace(
+        &mut gctx.comp_scope,
+        crate::comptime::ComptimeScope::new(),
+    );
+    // Nor to the caller's generic parameters (`want` is already concrete).
+    gctx.ctx.push_subst(HashMap::new());
+    // A const used inside another const's init keeps the outermost anchor:
+    // that is the line in the user's code.
+    let outer = gctx.const_anchor.is_none();
+    if outer {
+        gctx.const_anchor = Some((use_node, name.to_string()));
+    }
+    let first_inst = gctx.jfn.insts.len();
+    let r = astgen_expr(gctx, mc.init_expr, want);
+    if outer {
+        gctx.const_anchor = None;
+    }
+    gctx.locals = saved_locals;
+    gctx.local_types = saved_local_types;
+    gctx.comp_scope = saved_comp_scope;
+    if switch {
+        // The init's instructions are emitted into the caller's body, which
+        // codegen lowers under the caller's module: qualify their types now
+        // (`P` -> `m.P`).
+        for i in first_inst..gctx.jfn.insts.len() {
+            let ty = gctx.jfn.insts[i].ty;
+            if !ty.is_none() {
+                gctx.jfn.insts[i].ty = gctx.ctx.requalify_type(ty, module);
+            }
+        }
+        gctx.ctx.pop_body_module();
+    }
+    gctx.ctx.pop_subst();
+    gctx.ctx.pop_const_scope();
+    gctx.current_node = use_node;
+    if !outer {
+        return r;
+    }
+    r.map_err(|e| format!("{e} (the value of const `{name}`)"))
+}
+
 fn astgen_variable(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Result<JirRef, String> {
     let name = str_at(gctx, n.lhs);
     if let Some(&slot) = gctx.locals.get(&name) {
@@ -1465,52 +1901,43 @@ fn astgen_variable(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Resu
     // value and materializes (narrowed to its declared type); a plain const
     // re-lowers its initializer (recursively, for sibling references).
     let bm = gctx.ctx.current_body_module();
-    let mc = (!bm.is_empty())
-        .then(|| gctx.ctx.get_module_const(&format!("{bm}.{name}")))
-        .flatten()
-        .or_else(|| gctx.ctx.get_module_const(&name));
+    let mc = lookup_bare_const(gctx, &name);
     if let Some(mc) = mc {
         if mc.is_comp {
-            let v = gctx.ctx.fold_comptime_expr(mc.init_expr);
+            let v = fold_const_in_module(gctx, &mc);
             if !v.is_none() {
                 // A `comp const` (width u64 for an untyped int literal)
                 // materializes narrowed to the USE SITE's expected type first,
                 // falling back to the const's own declared type. Without this,
                 // `var n: u32 = N` stores an i64 into the i32 slot.
-                let want = if expected.is_none() {
-                    mc.declared_type
-                } else {
-                    expected
-                };
+                let want = const_use_type(&mc, expected, true);
                 return materialize_comptime_value(gctx, &v, want, &format!("comp const `{name}`"));
             }
         }
-        return astgen_expr(gctx, mc.init_expr, mc.declared_type);
+        return lower_const_init(gctx, &mc, expected, false, &name);
     }
     // Fn-name as a value: a typed function pointer when the use site expects a
     // `Fn`, else the legacy raw u64 address. (Generic fns have no body to point
     // at here.)
-    if let Some(f) = gctx.ctx.get_function_ast(&name) {
-        if f.is_generic() {
-            return Ok(recover_here(
-                gctx,
-                format!("cannot take address of generic fn `{name}`"),
-                TypeIdx::NONE,
-            ));
-        }
-        let sid = gctx.ctx.string_pool.intern(name.as_bytes());
-        let expect_fn =
-            !expected.is_none() && gctx.ctx.type_pool.get(expected).kind == TypeKind::Fn;
-        let ty = if expect_fn { expected } else { builtin::U64 };
-        return Ok(emit(
-            gctx,
-            JirInst {
-                tag: JirTag::FnRef,
-                a: sid.raw(),
-                ty,
-                ..Default::default()
-            },
-        ));
+    // Like a direct call: the body module's own fn wins over whichever module
+    // registered the bare key.
+    let cm = gctx.ctx.const_lookup_module();
+    let own = [cm, bm.clone()]
+        .into_iter()
+        .filter(|m| !m.is_empty())
+        .find_map(|m| gctx.ctx.get_function_ast(&format!("{m}.{name}")))
+        .or_else(|| {
+            // In the entry, its own fn of that name wins (the bare key).
+            if bm.is_empty() && gctx.ctx.const_lookup_module().is_empty() && gctx.ctx.is_entry_fn(&name)
+            {
+                return None;
+            }
+            gctx.ctx
+                .destructured_module(&name)
+                .and_then(|src| gctx.ctx.get_function_ast(&format!("{src}.{name}")))
+        });
+    if let Some(f) = own.or_else(|| gctx.ctx.get_function_ast(&name)) {
+        return fn_value_ref(gctx, &f, &name, expected);
     }
     // Emit a Poison so the rest of the function still gets analyzed and
     // additional errors report in one pass.
@@ -1939,6 +2366,7 @@ fn astgen_binary_op(
     expected: TypeIdx,
 ) -> Result<JirRef, String> {
     let mut lhs_ref = astgen_expr(gctx, NodeIdx::new(n.lhs), expected)?;
+    reject_void_call_value(gctx, lhs_ref)?;
     // Short-circuit LogAnd (11) / LogOr (12): the RHS must lower INSIDE its
     // branch so its side effects only run when the LHS doesn't decide —
     // eager lowering here used to evaluate `b()` in `false && b()`.
@@ -1974,6 +2402,7 @@ fn astgen_binary_op(
         }
         gctx.current_block = rhs_b;
         let rhs_ref = astgen_expr(gctx, NodeIdx::new(n.rhs), builtin::BOOL)?;
+        reject_void_call_value(gctx, rhs_ref)?;
         emit(
             gctx,
             JirInst {
@@ -1998,6 +2427,7 @@ fn astgen_binary_op(
     // Peer-type hint: lower the RHS at the LHS's resolved width.
     let mut lhs_type = gctx.jfn.get_inst(lhs_ref).ty;
     let mut rhs_ref = astgen_expr(gctx, NodeIdx::new(n.rhs), lhs_type)?;
+    reject_void_call_value(gctx, rhs_ref)?;
 
     // Slice equality (`a == b` / `a != b` on `[]T`): same length AND same
     // bytes (memcmp). Element type must compare by representation — ints,
@@ -2146,28 +2576,94 @@ fn astgen_binary_op(
     ))
 }
 
+/// Do two types name the same type? Like comparing [`resolve_for_cmp`], but
+/// fn types compare structurally, so `fn(m.P) i64` (through an import
+/// handle) matches `fn(mod.P) i64`. An omitted return matches `void`.
+fn types_match(ctx: &CodegenContext, a: TypeIdx, b: TypeIdx) -> bool {
+    let void = |t: TypeIdx| t.is_none() || t == builtin::VOID;
+    if void(a) || void(b) {
+        return void(a) && void(b);
+    }
+    let ra = resolve_for_cmp(ctx, a);
+    let rb = resolve_for_cmp(ctx, b);
+    if ra == rb {
+        return true;
+    }
+    let ka = ctx.type_pool.get(ra);
+    let kb = ctx.type_pool.get(rb);
+    // Pointers, slices and arrays compare by element (`*mut Vec(T)` inside
+    // an instance matches the concrete `*mut Vec__u8`).
+    if ka.kind == kb.kind
+        && matches!(
+            ka.kind,
+            TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Slice | TypeKind::Array
+        )
+    {
+        return ka.b == kb.b && types_match(ctx, TypeIdx::new(ka.a), TypeIdx::new(kb.a));
+    }
+    if ka.kind != TypeKind::Fn || kb.kind != TypeKind::Fn {
+        return false;
+    }
+    let pa = ctx.type_pool.fn_params_at(ka.b);
+    let pb = ctx.type_pool.fn_params_at(kb.b);
+    pa.len() == pb.len()
+        && types_match(ctx, TypeIdx::new(ka.a), TypeIdx::new(kb.a))
+        && pa.iter().zip(&pb).all(|(&x, &y)| types_match(ctx, x, y))
+}
+
 /// Resolve a declared/initializer type through generic-call, type-alias,
 /// generic-substitution, and module re-export chains for the var-decl
 /// declared-vs-initializer comparison. Both sides are run through this so
 /// `var a: Identity(i32) = 42;` compares `i32 == i32` rather than
 /// `GenericCall != Int`.
 fn resolve_for_cmp(ctx: &CodegenContext, t: TypeIdx) -> TypeIdx {
-    if t.is_none() {
+    // The chase is bounded: import handles that swap module names
+    // (`const a = import("b"); const b = import("a")`) make aliases that
+    // map `a.S` and `b.S` onto each other, which recursed until the stack
+    // overflowed.
+    thread_local! {
+        static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    if t.is_none() || DEPTH.with(|d| d.get()) >= 64 {
         return t;
     }
-    // Qualify bare user-type references first so a declared bare `Color` and an
+    DEPTH.with(|d| d.set(d.get() + 1));
+    let r = resolve_for_cmp_step(ctx, t);
+    DEPTH.with(|d| d.set(d.get() - 1));
+    r
+}
+
+fn resolve_for_cmp_step(ctx: &CodegenContext, t: TypeIdx) -> TypeIdx {
+    // Generic substitution wins (inside an instantiated method body, `T`
+    // resolves to whatever the instantiation supplied). The argument is
+    // already a concrete type: resolve it with the substitution hidden, so a
+    // user type spelled like a parameter (`Pair(U, T)` with a user `U`) isn't
+    // substituted again (that looped, or resolved to the wrong argument).
+    {
+        let k = ctx.type_pool.get(t);
+        if k.kind == TypeKind::Named && ctx.has_active_subst() {
+            let name = String::from_utf8_lossy(&ctx.string_pool.get(StringIdx::new(k.a))).into_owned();
+            let sub = ctx.lookup_current_subst(&name);
+            if !sub.is_none() {
+                ctx.push_subst(HashMap::new());
+                let r = resolve_for_cmp(ctx, sub);
+                ctx.pop_subst();
+                return r;
+            }
+        }
+    }
+    // Qualify bare user-type references so a declared bare `Color` and an
     // initializer typed with the qualified `mod.Color` compare equal. No-op for
-    // already-qualified, substitution, and primitive types.
+    // already-qualified and primitive types.
     let t = ctx.requalify_type(t, &ctx.current_body_module());
     let k = ctx.type_pool.get(t);
-    if k.kind == TypeKind::Named {
-        let name = String::from_utf8_lossy(&ctx.string_pool.get(StringIdx::new(k.a))).into_owned();
-        // Generic substitution wins (inside an instantiated method body, `T`
-        // resolves to whatever the instantiation supplied).
-        let sub = ctx.lookup_current_subst(&name);
-        if !sub.is_none() {
-            return resolve_for_cmp(ctx, sub);
-        }
+    // `[N]u8` with a const length: compare the instantiated array (an index
+    // lvalue into `[N][N]u8` yields the raw ArrayExpr element).
+    if k.kind == TypeKind::ArrayExpr
+        && let Ok(r) = ctx.resolve_array_expr_instantiate(t)
+        && r != t
+    {
+        return resolve_for_cmp(ctx, r);
     }
     if k.kind == TypeKind::GenericCall {
         let r = ctx.resolve_generic_call(t);
@@ -2210,6 +2706,9 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
     let declared = TypeIdx::new(gctx.ctx.node_store.get_extra(ExtraIdx::new(extra + 1)));
     let init_idx = NodeIdx::new(gctx.ctx.node_store.get_extra(ExtraIdx::new(extra + 2)));
     let name = str_at(gctx, name_id);
+    // `var c = c;` moves the OUTER `c`: resolve it before the new binding
+    // takes the name.
+    let moved_src = moved_source_slot(gctx, init_idx);
 
     // Reject re-declaration within the same lexical scope only. We inspect the
     // innermost `local_scopes` frame, so `const a = X; var a = Y;` at the same
@@ -2275,11 +2774,7 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
                 ..Default::default()
             },
         );
-        gctx.locals.insert(name.clone(), alloca_ref);
-        gctx.local_types.insert(name.clone(), ty);
-        if let Some(frame) = gctx.local_scopes.last_mut() {
-            frame.insert(name.clone());
-        }
+        bind_scoped_local(gctx, &name, alloca_ref, ty);
         emit(
             gctx,
             JirInst {
@@ -2291,9 +2786,12 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
         );
         (alloca_ref, ty)
     } else {
-        // Declared: register the slot before lowering the init (self-ref). Try
-        // the place-into-destination path first (StructLit / sret Call write
-        // directly into the slot); fall back to value-compile + Store.
+        // Declared: try the place-into-destination path first (StructLit /
+        // sret Call write directly into the slot); fall back to value-compile
+        // + Store. A fresh name binds before the init, so the init can take
+        // its address (`var head: Node = Node { next: &head }`). A name that
+        // shadows an outer binding binds after, so `var y: i64 = y + 1` in an
+        // inner block reads the OUTER `y`, as the inferred form does.
         // Local-slot types stay bare; registry lookups requalify at use. An
         // `[expr]T` array type resolves its comptime length so the slot is a
         // concrete `[n]T`.
@@ -2310,48 +2808,20 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
                 ..Default::default()
             },
         );
-        gctx.locals.insert(name.clone(), alloca_ref);
-        gctx.local_types.insert(name.clone(), ty);
-        if let Some(frame) = gctx.local_scopes.last_mut() {
-            frame.insert(name.clone());
+        let bind_early = !gctx.locals.contains_key(&name);
+        if bind_early {
+            bind_scoped_local(gctx, &name, alloca_ref, ty);
         }
         if !astgen_expr_into_ptr(gctx, init_idx, ty, alloca_ref)? {
             let init_ref = astgen_expr(gctx, init_idx, ty)?;
-            // Type-check the init against the declared type. The
-            // astgen_number_lit path already narrows
-            // integer literals to the declared int width when `expected` is an
-            // Int, so `var x: i32 = 5;` lands as I32. Anything else that doesn't
-            // match is a real mismatch — `var x: f32 = 3;` (int into float),
-            // `var x: i32 = 3.5;` (float into int), `const y: u32 = x`(i8), etc.
-            // Both sides are resolved through generic-call / type-alias chains
-            // first; PtrSingle(T)/PtrMany(T) share a representation so they're
-            // leniently compatible (a zero-cost retag).
-            let init_ty = gctx.jfn.get_inst(init_ref).ty;
-            let decl_res = resolve_for_cmp(gctx.ctx, ty);
-            let init_res = resolve_for_cmp(gctx.ctx, init_ty);
-            let pointer_compatible = |a: TypeIdx, b: TypeIdx| -> bool {
-                if a.is_none() || b.is_none() {
-                    return false;
-                }
-                let ka = gctx.ctx.type_pool.get(a);
-                let kb = gctx.ctx.type_pool.get(b);
-                let a_ptr = ka.kind == TypeKind::PtrSingle || ka.kind == TypeKind::PtrMany;
-                let b_ptr = kb.kind == TypeKind::PtrSingle || kb.kind == TypeKind::PtrMany;
-                a_ptr && b_ptr && ka.a == kb.a
-            };
-            let types_match = decl_res == init_res || pointer_compatible(decl_res, init_res);
-            if !init_ty.is_none() && !types_match {
-                let dk = gctx.ctx.type_pool.get(decl_res);
-                let ik = gctx.ctx.type_pool.get(init_res);
-                if dk.kind == TypeKind::Float && ik.kind == TypeKind::Int {
-                    return Err(format!(
-                        "cannot assign integer to float-typed `{name}`; use a float literal (e.g. `3.0`) or an explicit `as` cast"
-                    ));
-                }
-                return Err(format!(
-                    "type mismatch in `{name}`: declared and initialised values disagree"
-                ));
-            }
+            // Type-check the init against the declared type.
+            check_value_type(
+                gctx,
+                ty,
+                init_ref,
+                &name,
+                "declared and initialised values disagree",
+            )?;
             emit(
                 gctx,
                 JirInst {
@@ -2362,6 +2832,9 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
                 },
             );
         }
+        if !bind_early {
+            bind_scoped_local(gctx, &name, alloca_ref, ty);
+        }
         (alloca_ref, ty)
     };
 
@@ -2369,7 +2842,9 @@ fn astgen_var_decl(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
     // owns the value, so the source's scope-exit drop is suppressed. `var x = h.c`
     // (field extraction) has no per-field suppression — reject it instead.
     reject_drop_bearing_field_extract(gctx, init_idx, ty, "copy")?;
-    consume_moved_variable(gctx, init_idx);
+    if let Some(slot) = moved_src {
+        consume_moved_slot(gctx, slot);
+    }
     // If this binding's type owns heap, track it for scope-exit cleanup (a
     // registered `cfn drop`, or field-recursive when the name is empty).
     if gctx.ctx.type_needs_drop(ty) {
@@ -2469,6 +2944,7 @@ fn astgen_lvalue(gctx: &mut AstGenCtx, node: NodeIdx) -> Result<(JirRef, TypeIdx
         AstTag::Index => {
             let (mut base_ptr, base_ty) = astgen_lvalue(gctx, NodeIdx::new(n.lhs))?;
             let idx_ref = astgen_expr(gctx, NodeIdx::new(n.rhs), builtin::U64)?;
+            reject_void_call_value(gctx, idx_ref)?;
             let (kind, a) = {
                 let k = gctx.ctx.type_pool.get(base_ty);
                 (k.kind, k.a)
@@ -2593,6 +3069,206 @@ fn assign_target_is_value_world(gctx: &AstGenCtx, target_idx: NodeIdx) -> bool {
     true
 }
 
+/// A call placed straight into a typed slot must return that type: with an
+/// sret return the callee writes its own layout through the slot pointer, so
+/// a different type (`var x: Node = m.mkNode()` where the two `Node`s
+/// differ) would be misread. `r` is the call's value, or `NO_JIR_REF` when it
+/// wrote through the slot; then the call is the last one emitted since
+/// `before`.
+fn check_call_into_slot(
+    gctx: &AstGenCtx,
+    before: usize,
+    r: JirRef,
+    slot_ty: TypeIdx,
+) -> Result<(), String> {
+    if slot_ty.is_none() {
+        return Ok(());
+    }
+    let call_ty = if r != NO_JIR_REF {
+        gctx.jfn.get_inst(r).ty
+    } else {
+        match gctx.jfn.insts[before..]
+            .iter()
+            .rev()
+            .find(|i| matches!(i.tag, JirTag::Call | JirTag::CallIndirect))
+        {
+            Some(i) => i.ty,
+            None => return Ok(()),
+        }
+    };
+    if call_ty.is_none() || call_ty == builtin::NORETURN || types_match(gctx.ctx, slot_ty, call_ty) {
+        return Ok(());
+    }
+    // Scalars and pointers keep the existing value-path rules.
+    let is_aggregate = |t: TypeIdx| {
+        let k = gctx.ctx.type_pool.get(resolve_for_cmp(gctx.ctx, t)).kind;
+        matches!(k, TypeKind::Struct | TypeKind::Named | TypeKind::Array)
+    };
+    if r == NO_JIR_REF || (is_aggregate(slot_ty) && is_aggregate(call_ty)) {
+        return Err("type mismatch: the call returns a different type than the slot it fills".into());
+    }
+    Ok(())
+}
+
+/// A call that returns nothing can't fill a slot (`var x: i32 = v()` used
+/// to store a `void`).
+fn reject_void_call_value(gctx: &AstGenCtx, r: JirRef) -> Result<(), String> {
+    if r == NO_JIR_REF {
+        return Ok(());
+    }
+    let inst = gctx.jfn.get_inst(r);
+    if inst.ty.is_none() && matches!(inst.tag, JirTag::Call | JirTag::CallIndirect) {
+        return Err("type mismatch: the call returns nothing, so it has no value".into());
+    }
+    Ok(())
+}
+
+/// Type-check a value about to be stored into a slot of type `slot_ty`
+/// (a `var` init or an assignment). Both sides are resolved through
+/// generic-call / type-alias chains first; PtrSingle(T)/PtrMany(T) share a
+/// representation so they're leniently compatible (a zero-cost retag).
+/// Integer literals already settle at the slot width via the expected hint,
+/// so anything left that disagrees is a real mismatch (`f32 = 3`,
+/// `i32 = 3.5`, `u8 = some_u64`). Without this an assignment would emit a
+/// store of the value's width into a narrower slot.
+fn check_value_type(
+    gctx: &AstGenCtx,
+    slot_ty: TypeIdx,
+    value_ref: JirRef,
+    name: &str,
+    mismatch: &str,
+) -> Result<(), String> {
+    let value_ty = gctx.jfn.get_inst(value_ref).ty;
+    if value_ty.is_none()
+        && !slot_ty.is_none()
+        && matches!(
+            gctx.jfn.get_inst(value_ref).tag,
+            JirTag::Call | JirTag::CallIndirect
+        )
+    {
+        return Err(format!(
+            "type mismatch in `{name}`: the call returns nothing"
+        ));
+    }
+    if value_ty.is_none() || value_ty == builtin::NORETURN {
+        return Ok(());
+    }
+    if types_match(gctx.ctx, slot_ty, value_ty) {
+        return Ok(());
+    }
+    let slot_res = resolve_for_cmp(gctx.ctx, slot_ty);
+    let value_res = resolve_for_cmp(gctx.ctx, value_ty);
+    let sk = gctx.ctx.type_pool.get(slot_res);
+    let vk = gctx.ctx.type_pool.get(value_res);
+    let is_ptr = |k: TypeKind| k == TypeKind::PtrSingle || k == TypeKind::PtrMany;
+    if is_ptr(sk.kind) && is_ptr(vk.kind) && sk.a == vk.a {
+        return Ok(());
+    }
+    if sk.kind == TypeKind::Float && vk.kind == TypeKind::Int {
+        return Err(format!(
+            "cannot assign integer to float-typed `{name}`; use a float literal (e.g. `3.0`) or an explicit `as` cast"
+        ));
+    }
+    Err(format!("type mismatch in `{name}`: {mismatch}"))
+}
+
+/// Builtin scalar name for diagnostics.
+fn scalar_name(t: TypeIdx) -> &'static str {
+    const NAMES: [&str; 11] = [
+        "bool", "u8", "i8", "u16", "i16", "u32", "i32", "u64", "i64", "f32", "f64",
+    ];
+    let i = t.index();
+    if (builtin::BOOL.index()..=builtin::F64.index()).contains(&i) {
+        NAMES[i - builtin::BOOL.index()]
+    } else {
+        "scalar"
+    }
+}
+
+/// Reject a scalar (int, float, bool) value whose type differs from the
+/// scalar slot it is about to fill. Used where a value lands in a typed slot
+/// but the full `check_value_type` would be too strict (call and method
+/// args, literal elements and fields: generic params, slices, and other
+/// lenient conversions pass through there). A mismatched scalar would
+/// otherwise be stored or passed at its own width: a u64 into a u8 field
+/// writes 8 bytes, and a call passes an i64 where the callee takes an i8.
+fn check_scalar_width(
+    gctx: &AstGenCtx,
+    slot_ty: TypeIdx,
+    value_ref: JirRef,
+    what: &str,
+) -> Result<(), String> {
+    check_slot_types(gctx, slot_ty, gctx.jfn.get_inst(value_ref).ty, what)
+}
+
+/// [`check_scalar_width`] on types: a value of `value_ty` filling a slot of
+/// `slot_ty` (also an lvalue argument handed over by pointer).
+fn check_slot_types(
+    gctx: &AstGenCtx,
+    slot_ty: TypeIdx,
+    value_ty: TypeIdx,
+    what: &str,
+) -> Result<(), String> {
+    if value_ty.is_none() || slot_ty.is_none() {
+        return Ok(());
+    }
+    let slot_res = resolve_for_cmp(gctx.ctx, slot_ty);
+    let value_res = resolve_for_cmp(gctx.ctx, value_ty);
+    let is_scalar = |t: TypeIdx| {
+        matches!(
+            gctx.ctx.type_pool.get(t).kind,
+            TypeKind::Int | TypeKind::Float | TypeKind::Bool
+        )
+    };
+    // Two fn types must match: calling through a slot of another fn type
+    // uses the wrong ABI (`use(f)` with `f: fn(i32) S` for `fn(i32) i32`).
+    if gctx.ctx.type_pool.get(slot_res).kind == TypeKind::Fn
+        && gctx.ctx.type_pool.get(value_res).kind == TypeKind::Fn
+        && !types_match(gctx.ctx, slot_ty, value_ty)
+    {
+        return Err(format!(
+            "type mismatch in {what}: the fn value has a different fn type than the slot"
+        ));
+    }
+    // Two aggregates must be the same type: a different struct in the slot
+    // would be read with the wrong layout (`H { a: B {..} }` with `a: A`).
+    let is_aggregate = |t: TypeIdx| {
+        matches!(
+            gctx.ctx.type_pool.get(t).kind,
+            TypeKind::Struct | TypeKind::Named | TypeKind::Array
+        )
+    };
+    if is_aggregate(slot_res)
+        && is_aggregate(value_res)
+        && slot_res != value_res
+        && !types_match(gctx.ctx, slot_ty, value_ty)
+    {
+        return Err(format!(
+            "type mismatch in {what}: the value is a different type than the slot"
+        ));
+    }
+    if slot_res == value_res || !is_scalar(slot_res) || !is_scalar(value_res) {
+        return Ok(());
+    }
+    Err(format!(
+        "type mismatch in {what}: expected `{}`, found `{}`; use an explicit `as` cast",
+        scalar_name(slot_res),
+        scalar_name(value_res)
+    ))
+}
+
+/// The assigned-to root variable's name, for diagnostics (`a` in `a.b[i] = x`).
+fn assign_target_name(gctx: &AstGenCtx, mut idx: NodeIdx) -> String {
+    loop {
+        let node = *gctx.ctx.node_store.get(idx);
+        match node.tag {
+            AstTag::Variable => return str_at(gctx, node.lhs),
+            AstTag::Index | AstTag::MemberAccess | AstTag::Deref => idx = NodeIdx::new(node.lhs),
+            _ => return "assignment".to_string(),
+        }
+    }
+}
+
 /// Lower an assignment `target = value`: resolve the target to a pointer, lower
 /// the value at the slot's leaf type, drop the old value first (overwrite-drop
 /// of a live drop-bearing value-world destination — RHS evaluates first, old
@@ -2693,6 +3369,7 @@ fn astgen_assign(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
             reject_drop_bearing_field_extract(gctx, value_idx, val_param_ty, "copy")?;
             let idx_u64 = astgen_expr(gctx, idx_idx, builtin::U64)?;
             let val_ref = astgen_expr(gctx, value_idx, val_param_ty)?;
+            check_scalar_width(gctx, val_param_ty, val_ref, "element assignment")?;
             let idx_ref = narrow_index(gctx, idx_u64, method.args[1].ty);
             emit_call(gctx, &method, &[recv, idx_ref, val_ref], NO_JIR_REF)?;
             consume_moved_variable(gctx, value_idx);
@@ -2704,6 +3381,16 @@ fn astgen_assign(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
     // reject.
     reject_drop_bearing_field_extract(gctx, value_idx, leaf_ty, "copy")?;
     let val_ref = astgen_expr(gctx, value_idx, leaf_ty)?;
+    if !leaf_ty.is_none() {
+        let name = assign_target_name(gctx, target_idx);
+        check_value_type(
+            gctx,
+            leaf_ty,
+            val_ref,
+            &name,
+            "assigned value has a different type",
+        )?;
+    }
     if !leaf_ty.is_none()
         && gctx.ctx.type_needs_drop(leaf_ty)
         && assign_target_is_value_world(gctx, target_idx)
@@ -2729,6 +3416,7 @@ fn astgen_assign(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
 ///   `~x` — `BitNot`.
 fn astgen_unary_op(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Result<JirRef, String> {
     let operand = astgen_expr(gctx, NodeIdx::new(n.lhs), expected)?;
+    reject_void_call_value(gctx, operand)?;
     let ty = gctx.jfn.get_inst(operand).ty;
     match n.op {
         1 => {
@@ -2813,7 +3501,10 @@ fn astgen_as_cast(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, String> {
     } else {
         TypeIdx::NONE
     };
-    let val = astgen_expr(gctx, operand_idx, hint)?;
+    let saved_cast_hint = std::mem::replace(&mut gctx.cast_hint, hint);
+    let val = astgen_expr(gctx, operand_idx, hint);
+    gctx.cast_hint = saved_cast_hint;
+    let val = val?;
     let mut src_ty = gctx.jfn.get_inst(val).ty;
     if src_ty == dst_ty {
         return Ok(val);
@@ -3105,6 +3796,8 @@ fn lower_arg(gctx: &mut AstGenCtx, arg_idx: NodeIdx, p: &Param) -> Result<JirRef
     let pabi = classify_param(p.mode, p.ty, gctx.ctx)?;
     let r = if pabi.kind != ParamAbiKind::ByPointer {
         let v = astgen_expr(gctx, arg_idx, p.ty)?;
+        reject_void_call_value(gctx, v)?;
+        check_scalar_width(gctx, p.ty, v, &format!("argument `{}`", p.name))?;
         // A runtime slice does not implicitly decay to a pointer parameter;
         // passing a {ptr,len} aggregate where a bare pointer is expected
         // silently corrupts the ABI — require an explicit `.ptr`.
@@ -3123,14 +3816,20 @@ fn lower_arg(gctx: &mut AstGenCtx, arg_idx: NodeIdx, p: &Param) -> Result<JirRef
         let arg_node = *gctx.ctx.node_store.get(arg_idx);
         match arg_node.tag {
             // Lvalueable args hand over their existing storage pointer.
-            AstTag::Variable | AstTag::Index | AstTag::Deref => astgen_lvalue(gctx, arg_idx)?.0,
+            AstTag::Variable | AstTag::Index | AstTag::Deref => {
+                let (ptr, leaf) = astgen_lvalue(gctx, arg_idx)?;
+                check_slot_types(gctx, p.ty, leaf, &format!("argument `{}`", p.name))?;
+                ptr
+            }
             // A `Type.Variant` / `handle.X` member access whose base is a non-local
             // Variable is a CONSTRUCTOR (e.g. a payloaded enum's unit variant
             // `Msg.Quit`), not an lvalue — astgen_lvalue can't resolve the base.
             // Spill it like any rvalue (the `_` arm). A member access on a LOCAL
             // (`s.field`) stays an lvalue.
             AstTag::MemberAccess if !member_access_is_ctor(gctx, &arg_node) => {
-                astgen_lvalue(gctx, arg_idx)?.0
+                let (ptr, leaf) = astgen_lvalue(gctx, arg_idx)?;
+                check_slot_types(gctx, p.ty, leaf, &format!("argument `{}`", p.name))?;
+                ptr
             }
             AstTag::AddressOf => astgen_expr(gctx, arg_idx, TypeIdx::NONE)?,
             // Spill an rvalue into a fresh slot so the callee gets a pointer
@@ -3145,6 +3844,8 @@ fn lower_arg(gctx: &mut AstGenCtx, arg_idx: NodeIdx, p: &Param) -> Result<JirRef
                     },
                 );
                 let val = astgen_expr(gctx, arg_idx, p.ty)?;
+                reject_void_call_value(gctx, val)?;
+                check_scalar_width(gctx, p.ty, val, &format!("argument `{}`", p.name))?;
                 emit(
                     gctx,
                     JirInst {
@@ -3650,6 +4351,7 @@ fn astgen_enum_variant_ctor(
             // out of an aggregate to capture it is rejected.
             reject_drop_bearing_field_extract(gctx, arg_idx, field_ty, "capture")?;
             let pay_val = astgen_expr(gctx, arg_idx, field_ty)?;
+            check_scalar_width(gctx, field_ty, pay_val, "enum payload")?;
             consume_moved_variable(gctx, arg_idx);
             let off_ref = emit(
                 gctx,
@@ -3713,13 +4415,32 @@ fn astgen_call(gctx: &mut AstGenCtx, n: &AstNode, dest_ptr: JirRef) -> Result<Ji
     // Resolve a bare callee against the BODY module first: two modules may
     // each define `scale`, and a body must reach its own, not whichever
     // registered last under the bare key.
-    let body_qualified = {
+    // In a generic struct's method the DEFINING module's fns come first
+    // (the const scope), as its consts do.
+    let body_qualified = if callee.contains('.') {
+        None
+    } else {
+        let cm = gctx.ctx.const_lookup_module();
         let bm = gctx.ctx.current_body_module();
-        if !bm.is_empty() && !callee.contains('.') {
-            gctx.ctx.get_function_ast(&format!("{bm}.{callee}"))
-        } else {
-            None
-        }
+        let in_entry = cm.is_empty() && bm.is_empty();
+        // Externs are keyed by their declaring module too, so std's `Vec`
+        // reaches C `malloc` even when the user's module has a `fn malloc`.
+        // A destructured fn (`const { mk } = import("xb")`) is xb's, not
+        // whichever module claimed the bare key.
+        [cm, bm]
+            .into_iter()
+            .filter(|m| !m.is_empty())
+            .find_map(|m| gctx.ctx.get_function_ast(&format!("{m}.{callee}")))
+            .or_else(|| {
+                // In the entry, its own fn of that name wins (it is on the
+                // bare key, tried below).
+                if in_entry && gctx.ctx.is_entry_fn(&callee) {
+                    return None;
+                }
+                gctx.ctx
+                    .destructured_module(&callee)
+                    .and_then(|src| gctx.ctx.get_function_ast(&format!("{src}.{callee}")))
+            })
     };
     // A handle-qualified spelling of a PRIVATE function must not resolve, even
     // when the handle name coincides with the module identity and the raw
@@ -4750,12 +5471,26 @@ fn lower_method_args(
         );
         let param = method.args.get(i as usize + 1);
         let expect = param.map(|p| p.ty).unwrap_or(TypeIdx::NONE);
+        // A `mut` param is a pointer to the caller's storage: lower it like a
+        // plain call's arg (the address of the lvalue, type-checked). Lowered
+        // by value, a `mut i64` was passed as the integer and the callee
+        // dereferenced it.
+        if let Some(p) = param
+            && p.mode == jam_core::param_mode::ParamMode::Mut
+        {
+            out.push(lower_arg(gctx, arg_idx, p)?);
+            continue;
+        }
         // A `move`-mode method arg extracting a drop-bearing field out of an
         // aggregate is rejected.
         if param.map(|p| p.mode) == Some(jam_core::param_mode::ParamMode::Move) {
             reject_drop_bearing_field_extract(gctx, arg_idx, expect, "move")?;
         }
-        out.push(astgen_expr(gctx, arg_idx, expect)?);
+        let v = astgen_expr(gctx, arg_idx, expect)?;
+        if let Some(p) = param {
+            check_scalar_width(gctx, expect, v, &format!("argument `{}`", p.name))?;
+        }
+        out.push(v);
         if param.map(|p| p.mode) == Some(jam_core::param_mode::ParamMode::Move) {
             consume_moved_variable(gctx, arg_idx);
         }
@@ -4783,12 +5518,23 @@ fn lower_type_method_args(
         );
         let param = method.args.get(i as usize);
         let expect = param.map(|p| p.ty).unwrap_or(TypeIdx::NONE);
+        // A `mut` param takes the lvalue's address (see `lower_method_args`).
+        if let Some(p) = param
+            && p.mode == jam_core::param_mode::ParamMode::Mut
+        {
+            out.push(lower_arg(gctx, arg_idx, p)?);
+            continue;
+        }
         // A `move`-mode arg extracting a drop-bearing field out of an
         // aggregate is rejected.
         if param.map(|p| p.mode) == Some(jam_core::param_mode::ParamMode::Move) {
             reject_drop_bearing_field_extract(gctx, arg_idx, expect, "move")?;
         }
-        out.push(astgen_expr(gctx, arg_idx, expect)?);
+        let v = astgen_expr(gctx, arg_idx, expect)?;
+        if let Some(p) = param {
+            check_scalar_width(gctx, expect, v, &format!("argument `{}`", p.name))?;
+        }
+        out.push(v);
         if param.map(|p| p.mode) == Some(jam_core::param_mode::ParamMode::Move) {
             consume_moved_variable(gctx, arg_idx);
         }
@@ -4865,7 +5611,19 @@ fn astgen_indirect_call(
 ) -> Result<JirRef, String> {
     let cn = *gctx.ctx.node_store.get(NodeIdx::new(n.lhs));
     if cn.tag != AstTag::MemberAccess {
-        return Err("astgen: indirect-call callee is not a member access".into());
+        // Any other callee expression (`pick(b)(x)`, `fs[i](x)`) must
+        // evaluate to a fn value, called through its fn type.
+        let v = astgen_expr(gctx, NodeIdx::new(n.lhs), TypeIdx::NONE)?;
+        if gctx.jfn.get_inst(v).tag == JirTag::Poison {
+            return Ok(v); // the callee already reported an error
+        }
+        let ty = gctx.jfn.get_inst(v).ty;
+        if ty.is_none() || gctx.ctx.type_pool.get(ty).kind != TypeKind::Fn {
+            return Err("only a function value can be called".into());
+        }
+        let args_extra = n.rhs;
+        let arg_count = gctx.ctx.node_store.get_extra(ExtraIdx::new(args_extra));
+        return build_indirect_call(gctx, v, args_extra, arg_count);
     }
     let recv_expr_idx = NodeIdx::new(cn.lhs);
     let method_name = str_at(gctx, cn.rhs);
@@ -5212,6 +5970,12 @@ fn astgen_type_method_enum_ctor(
             ..Default::default()
         },
     );
+    if arg_count as usize != payload_types.len() {
+        return Err(format!(
+            "`{variant_name}` takes {} payload value(s), {arg_count} given",
+            payload_types.len()
+        ));
+    }
     if !has_payload {
         return Ok(Some(tag_ref));
     }
@@ -5243,20 +6007,59 @@ fn astgen_type_method_enum_ctor(
             ..Default::default()
         },
     );
-    if !payload_types.is_empty() && arg_count >= 1 {
-        let field_ty = payload_types[0];
-        let arg_idx = NodeIdx::new(gctx.ctx.node_store.get_extra(ExtraIdx::new(extra + 2)));
+    // Every payload value at its offset in the payload area, laid out like
+    // the match bindings and the drop glue read it (each field aligned).
+    let pay_area = emit(
+        gctx,
+        JirInst {
+            tag: JirTag::FieldAddr,
+            a: slot,
+            b: 1,
+            ty: u8_ptr,
+            ..Default::default()
+        },
+    );
+    let mut off: u64 = 0;
+    for (i, &field_ty) in payload_types.iter().enumerate() {
+        let size = gctx.ctx.type_size(field_ty)?;
+        let align = gctx.ctx.type_align(field_ty)?.max(1);
+        off = off.div_ceil(align) * align;
+        let arg_idx = NodeIdx::new(
+            gctx.ctx
+                .node_store
+                .get_extra(ExtraIdx::new(extra + 2 + i as u32)),
+        );
         // Enum payload capture is a MOVE — a drop-bearing field extracted out
         // of an aggregate is rejected.
         reject_drop_bearing_field_extract(gctx, arg_idx, field_ty, "capture")?;
         let payload_val = astgen_expr(gctx, arg_idx, field_ty)?;
+        reject_void_call_value(gctx, payload_val)?;
+        check_scalar_width(gctx, field_ty, payload_val, "enum payload")?;
+        let off_ref = emit(
+            gctx,
+            JirInst {
+                tag: JirTag::Int,
+                a: off as u32,
+                ty: builtin::U64,
+                ..Default::default()
+            },
+        );
+        let byte_ptr = emit(
+            gctx,
+            JirInst {
+                tag: JirTag::IndexAddr,
+                a: pay_area,
+                b: off_ref,
+                ty: u8_ptr,
+                ..Default::default()
+            },
+        );
         let pf_ptr = gctx.ctx.type_pool.intern_ptr_single(field_ty);
         let pay_ptr = emit(
             gctx,
             JirInst {
-                tag: JirTag::FieldAddr,
-                a: slot,
-                b: 1,
+                tag: JirTag::BitCast,
+                a: byte_ptr,
                 ty: pf_ptr,
                 ..Default::default()
             },
@@ -5271,6 +6074,7 @@ fn astgen_type_method_enum_ctor(
             },
         );
         consume_moved_variable(gctx, arg_idx);
+        off += size;
     }
     Ok(Some(emit(
         gctx,
@@ -5354,15 +6158,24 @@ fn build_indirect_call(
             gctx.ctx.type_pool.fn_params_at(k.b).to_vec(),
         )
     };
+    if arg_count as usize != param_tys.len() {
+        return Err(format!(
+            "call through a fn value passes {arg_count} argument(s), its type takes {}",
+            param_tys.len()
+        ));
+    }
     let mut arg_refs: Vec<u32> = Vec::with_capacity(arg_count as usize);
-    for i in 0..arg_count {
+    for (i, &expect) in param_tys.iter().enumerate() {
         let arg_idx = NodeIdx::new(
             gctx.ctx
                 .node_store
-                .get_extra(ExtraIdx::new(args_extra + 1 + i)),
+                .get_extra(ExtraIdx::new(args_extra + 1 + i as u32)),
         );
-        let expect = param_tys.get(i as usize).copied().unwrap_or(TypeIdx::NONE);
-        arg_refs.push(astgen_expr(gctx, arg_idx, expect)?);
+        let v = astgen_expr(gctx, arg_idx, expect)?;
+        let what = format!("argument {}", i + 1);
+        check_scalar_width(gctx, expect, v, &what)?;
+        check_value_type(gctx, expect, v, &what, "the fn type wants a different type")?;
+        arg_refs.push(v);
     }
     let mut packed: Vec<u32> = Vec::with_capacity(1 + arg_refs.len());
     packed.push(arg_refs.len() as u32);
@@ -5829,6 +6642,31 @@ fn stmt_diverges(gctx: &AstGenCtx, node: NodeIdx) -> bool {
     false
 }
 
+/// A match pattern's integer (magnitude `val`, `negative`) must fit the
+/// scrutinee's type, or it would compare against its truncation (`300`
+/// matched a `u8` holding 44).
+fn check_pattern_int_fits(
+    gctx: &AstGenCtx,
+    val: u64,
+    negative: bool,
+    scrut_ty: TypeIdx,
+) -> Result<(), String> {
+    let sk = gctx.ctx.type_pool.get(resolve_for_cmp(gctx.ctx, scrut_ty));
+    if sk.kind != TypeKind::Int {
+        return Ok(());
+    }
+    let bits = if negative { (val as i64).wrapping_neg() as u64 } else { val };
+    // `-M` with M above 2^63 wraps: it fits nothing.
+    if !(negative && val > (1u64 << 63)) && comp_int_fits(bits, negative, sk.a as u16, sk.b != 0) {
+        return Ok(());
+    }
+    Err(format!(
+        "match pattern {}{val} does not fit the scrutinee's type `{}`",
+        if negative { "-" } else { "" },
+        scalar_name(resolve_for_cmp(gctx.ctx, scrut_ty))
+    ))
+}
+
 /// Try to express a pattern as Switch case(s) targeting `arm_block`. Returns
 /// `false` for any shape that needs a binding/compare block (ranges, payload
 /// bindings, module-const patterns) — the caller then falls to the CondBr chain.
@@ -5851,10 +6689,18 @@ fn collect_switch_cases(
             if p.flags & 1 != 0 {
                 val = (val as i64).wrapping_neg() as u64;
             }
-            let signed = {
-                let sk = gctx.ctx.type_pool.get(scrut_ty);
-                sk.kind == TypeKind::Int && sk.b != 0
-            };
+            let sk = gctx.ctx.type_pool.get(scrut_ty);
+            let signed = sk.kind == TypeKind::Int && sk.b != 0;
+            // A literal the scrutinee can't hold would match its truncation
+            // (`300` matched a `u8` 44): leave it to the compare path, whose
+            // literal lowering reports the range error.
+            let neg = p.flags & 1 != 0;
+            let mag = (p.lhs as u64) | ((p.rhs as u64) << 32);
+            if sk.kind == TypeKind::Int
+                && ((neg && mag > (1u64 << 63)) || !comp_int_fits(val, neg, sk.a as u16, signed))
+            {
+                return false;
+            }
             out.push(SwitchCase {
                 value: val,
                 is_signed: signed,
@@ -5869,16 +6715,18 @@ fn collect_switch_cases(
             // the const to a Switch case value.
             if !scrut_is_enum && infer_receiver && !has_bindings {
                 let cname = str_at(gctx, p.rhs);
-                let bm = gctx.ctx.current_body_module();
-                let mc = (!bm.is_empty())
-                    .then(|| gctx.ctx.get_module_const(&format!("{bm}.{cname}")))
-                    .flatten()
-                    .or_else(|| gctx.ctx.get_module_const(&cname));
+                let mc = lookup_bare_const(gctx, &cname);
                 if let Some(mc) = mc {
-                    let v = gctx.ctx.fold_comptime_expr(mc.init_expr);
-                    if v.is_int() {
+                    let v = fold_const_in_module(gctx, &mc);
+                    if let ComptimeValue::Int { bits, is_signed, .. } = v {
                         let sk = gctx.ctx.type_pool.get(scrut_ty);
                         let signed = sk.kind == TypeKind::Int && sk.b != 0;
+                        // Out of the scrutinee's range: see the literal arm.
+                        if sk.kind == TypeKind::Int
+                            && !comp_int_fits(bits, is_signed, sk.a as u16, signed)
+                        {
+                            return false;
+                        }
                         out.push(SwitchCase {
                             value: v.as_u64(),
                             is_signed: signed,
@@ -5957,6 +6805,7 @@ fn astgen_pattern_compare(
     match p.tag {
         AstTag::PatLit => {
             let val = (p.lhs as u64) | ((p.rhs as u64) << 32);
+            check_pattern_int_fits(gctx, val, p.flags & 1 != 0, scrut_ty)?;
             let k = emit(
                 gctx,
                 JirInst {
@@ -5987,6 +6836,8 @@ fn astgen_pattern_compare(
             let lo_hi = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 1));
             let hi_lo = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 2));
             let hi_hi = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 3));
+            check_pattern_int_fits(gctx, (lo_lo as u64) | ((lo_hi as u64) << 32), p.flags & 1 != 0, scrut_ty)?;
+            check_pattern_int_fits(gctx, (hi_lo as u64) | ((hi_hi as u64) << 32), p.flags & 2 != 0, scrut_ty)?;
             let lo_k = emit(
                 gctx,
                 JirInst {
@@ -6130,13 +6981,9 @@ fn astgen_pattern_compare_enum(
             // scrutinee against the const's value.
             if infer_receiver && !has_bindings {
                 let cname = str_at(gctx, variant_name_id);
-                let bm = gctx.ctx.current_body_module();
-                let mc = (!bm.is_empty())
-                    .then(|| gctx.ctx.get_module_const(&format!("{bm}.{cname}")))
-                    .flatten()
-                    .or_else(|| gctx.ctx.get_module_const(&cname));
+                let mc = lookup_bare_const(gctx, &cname);
                 if let Some(mc) = mc {
-                    let k = astgen_expr(gctx, mc.init_expr, scrut_ty)?;
+                    let k = lower_const_init(gctx, &mc, scrut_ty, true, &cname)?;
                     let cmp = emit(
                         gctx,
                         JirInst {
@@ -6778,6 +7625,7 @@ fn astgen_array_lit(
         // array element is rejected.
         reject_drop_bearing_field_extract(gctx, e, elem_ty, "capture")?;
         let r = astgen_expr(gctx, e, elem_ty)?;
+        check_scalar_width(gctx, elem_ty, r, "array literal element")?;
         consume_moved_variable(gctx, e);
         elems.push(r);
     }
@@ -6850,6 +7698,8 @@ fn astgen_array_repeat(
         }
     }
     let val = astgen_expr(gctx, value_idx, elem_ty)?;
+    reject_void_call_value(gctx, val)?;
+    check_scalar_width(gctx, elem_ty, val, "array repeat value")?;
     if elem_ty.is_none() {
         elem_ty = gctx.jfn.get_inst(val).ty;
     }
@@ -7021,6 +7871,7 @@ fn astgen_index(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, String> {
         if kind == TypeKind::Array {
             let elem_ty = TypeIdx::new(a);
             let idx_ref = astgen_expr(gctx, idx_idx, builtin::U64)?;
+            reject_void_call_value(gctx, idx_ref)?;
             let elem_ptr_ty = gctx.ctx.type_pool.intern_ptr_single(elem_ty);
             let elem_ptr = emit(
                 gctx,
@@ -7046,6 +7897,7 @@ fn astgen_index(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, String> {
 
     let base_ref = astgen_expr(gctx, base_idx, TypeIdx::NONE)?;
     let idx_ref = astgen_expr(gctx, idx_idx, builtin::U64)?;
+    reject_void_call_value(gctx, idx_ref)?;
     let (kind, a) = {
         let k = gctx.ctx.type_pool.get(gctx.jfn.get_inst(base_ref).ty);
         (k.kind, k.a)
@@ -7240,7 +8092,11 @@ fn astgen_address_of(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, String
     ))
 }
 
-fn astgen_member_access(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, String> {
+fn astgen_member_access(
+    gctx: &mut AstGenCtx,
+    n: &AstNode,
+    expected: TypeIdx,
+) -> Result<JirRef, String> {
     let base_idx = NodeIdx::new(n.lhs);
     let member = str_at(gctx, n.rhs);
     let base_node = *gctx.ctx.node_store.get(base_idx);
@@ -7313,17 +8169,35 @@ fn astgen_member_access(gctx: &mut AstGenCtx, n: &AstNode) -> Result<JirRef, Str
         {
             if let Some(mc) = gctx.ctx.get_module_const(&format!("{module}.{member}")) {
                 if mc.is_comp {
-                    let v = gctx.ctx.fold_comptime_expr(mc.init_expr);
+                    let v = fold_const_in_module(gctx, &mc);
                     if !v.is_none() {
                         return materialize_comptime_value(
                             gctx,
                             &v,
-                            mc.declared_type,
+                            const_use_type(&mc, expected, true),
                             &format!("comp const `{member}`"),
                         );
                     }
                 }
-                return astgen_expr(gctx, mc.init_expr, mc.declared_type);
+                return lower_const_init(gctx, &mc, expected, false, &format!("{base_name}.{member}"));
+            }
+            // A function through the handle as a value (`lib.f`). Externs and
+            // exports register under their bare C name.
+            if let Some(f) = gctx
+                .ctx
+                .get_function_ast(&format!("{module}.{member}"))
+                .or_else(|| {
+                    gctx.ctx
+                        .get_function_ast(&member)
+                        .filter(|f| f.is_extern || f.is_export)
+                })
+            {
+                if !f.is_pub && !f.is_extern && !f.is_export {
+                    return Err(format!(
+                        "symbol `{member}` is not exported from module `{module}`"
+                    ));
+                }
+                return fn_value_ref(gctx, &f, &format!("{base_name}.{member}"), expected);
             }
         }
     }
@@ -7598,6 +8472,8 @@ fn astgen_struct_lit(
             })
             .ok_or_else(|| format!("astgen: union has no field `{field_name}`"))?;
         let field_val = astgen_expr(gctx, expr_idx, field_ty)?;
+        reject_void_call_value(gctx, field_val)?;
+        check_scalar_width(gctx, field_ty, field_val, "union literal field")?;
         let slot = emit_alloca_hoisted(
             gctx,
             JirInst {
@@ -7656,6 +8532,7 @@ fn astgen_struct_lit(
         // leave the aggregate's glue to re-drop it — reject.
         reject_drop_bearing_field_extract(gctx, expr_idx, expected_field, "capture")?;
         let mut field_val = astgen_expr(gctx, expr_idx, expected_field)?;
+        reject_void_call_value(gctx, field_val)?;
         // Struct-literal field capture MOVES a bare drop-bearing local: the
         // field now owns it, so its scope-exit drop is suppressed.
         consume_moved_variable(gctx, expr_idx);
@@ -7686,6 +8563,7 @@ fn astgen_struct_lit(
                 );
             }
         }
+        check_scalar_width(gctx, expected_field, field_val, "struct literal field")?;
         ordered[idx] = field_val;
     }
     for (i, &r) in ordered.iter().enumerate() {
@@ -7745,7 +8623,10 @@ fn astgen_expr_into_ptr(
             Ok(true)
         }
         AstTag::Call => {
+            let before = gctx.jfn.insts.len();
             let r = astgen_call(gctx, &n, dest_ptr)?;
+            reject_void_call_value(gctx, r)?;
+            check_call_into_slot(gctx, before, r, expected_ty)?;
             // A real ref means a Direct (ByValue) return — finish by storing it.
             // `NO_JIR_REF` means the call used `dest_ptr` as its sret slot.
             if r != NO_JIR_REF {
@@ -7762,7 +8643,10 @@ fn astgen_expr_into_ptr(
             Ok(true)
         }
         AstTag::TypeMethodCall => {
+            let before = gctx.jfn.insts.len();
             let r = astgen_type_method_call(gctx, &n, dest_ptr)?;
+            reject_void_call_value(gctx, r)?;
+            check_call_into_slot(gctx, before, r, expected_ty)?;
             if r != NO_JIR_REF {
                 emit(
                     gctx,
@@ -7829,6 +8713,7 @@ fn astgen_expr_into_ptr(
                 );
                 if !astgen_expr_into_ptr(gctx, e_idx, e_ty, ep)? {
                     let ev = astgen_expr(gctx, e_idx, e_ty)?;
+                    check_scalar_width(gctx, e_ty, ev, "array literal element")?;
                     emit(
                         gctx,
                         JirInst {
@@ -7931,6 +8816,7 @@ fn astgen_struct_lit_into(
         );
         if !astgen_expr_into_ptr(gctx, expr_idx, expected_field, field_ptr)? {
             let mut val = astgen_expr(gctx, expr_idx, expected_field)?;
+            reject_void_call_value(gctx, val)?;
             let vt = gctx.jfn.get_inst(val).ty;
             if vt != expected_field && !vt.is_none() {
                 let fk_kind = gctx.ctx.type_pool.get(expected_field).kind;
@@ -7955,6 +8841,7 @@ fn astgen_struct_lit_into(
                     );
                 }
             }
+            check_scalar_width(gctx, expected_field, val, "struct literal field")?;
             emit(
                 gctx,
                 JirInst {
@@ -8012,7 +8899,13 @@ fn astgen_return(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
         // `return voidExpr;` (e.g. `return @callC(void, ...)` in a variadic
         // cfn instantiated at R = void): evaluate, then return nothing —
         // only legal when the function itself returns nothing.
-        if gctx.jfn.get_inst(val_ref).ty == builtin::VOID {
+        // A call to a fn that returns nothing (`return v();`) is the same.
+        let returns_nothing = {
+            let vi = gctx.jfn.get_inst(val_ref);
+            vi.ty == builtin::VOID
+                || (vi.ty.is_none() && matches!(vi.tag, JirTag::Call | JirTag::CallIndirect))
+        };
+        if returns_nothing {
             if !ret_ty.is_none() && ret_ty != builtin::VOID {
                 return Err(format!(
                     "astgen: cannot return a void expression from `{}`, which declares \
@@ -8190,6 +9083,7 @@ fn astgen_if(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
     }
 
     let cond_ref = astgen_expr(gctx, cond_idx, builtin::BOOL)?;
+    reject_void_call_value(gctx, cond_ref)?;
     let then_b = gctx.jfn.push_block("then");
     let else_b = if else_count > 0 {
         gctx.jfn.push_block("else")
@@ -8258,6 +9152,7 @@ fn astgen_while(gctx: &mut AstGenCtx, n: &AstNode) -> Result<(), String> {
     emit_br(gctx, cond_b);
     gctx.current_block = cond_b;
     let cond_ref = astgen_expr(gctx, cond_idx, builtin::BOOL)?;
+    reject_void_call_value(gctx, cond_ref)?;
     emit_cond_br(gctx, cond_ref, body_b, exit_b);
 
     gctx.current_block = body_b;
@@ -8878,9 +9773,12 @@ pub fn astgen_body_into(
         loop_stack: Vec::new(),
         drop_scopes: Vec::new(),
         local_scopes: Vec::new(),
+        shadow_saves: Vec::new(),
         comp_scope: crate::comptime::ComptimeScope::new(),
         comp_bind_info: Vec::new(),
         runtime_cond_depth: 0,
+        cast_hint: TypeIdx::NONE,
+        const_anchor: None,
         recovered: Vec::new(),
     };
     // Seed the root comp frame with any active comp-param substitutions, so a
@@ -9078,25 +9976,50 @@ pub fn instantiate_methods(
     // going; the rest of the instantiation still succeeds. The instantiated
     // LLVM body (jir_define_body) is what makes `--emit-ir` carry the method
     // definitions; it's a no-op on the --emit-jir text dump.
+    // Methods of this instance left without a real body: a sibling whose
+    // lowered code calls one is withdrawn too (below).
+    let mut withdrawn: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // A drop runs implicitly (drop glue, scope exit), so no call site checks
+    // it: one that can't be compiled gets an unreachable body and is recorded
+    // withdrawn, and the module-wide check after codegen reports whatever
+    // still calls it. A type only used by size or pointer never does.
+    let drop_error = |symbol: &str, why: &str| {
+        if let Some(f) = ctx.module().get_function(symbol) {
+            f.make_unreachable(ctx.builder());
+        }
+        let why = why.strip_prefix("astgen: ").unwrap_or(why);
+        ctx.record_withdrawn_method(
+            symbol.to_string(),
+            format!("this drop can't be compiled for the instantiation: {why}"),
+        );
+    };
+    for (jfn, _) in &built {
+        ctx.register_instance_method(jfn.name.clone());
+    }
     for (jfn, i) in &mut built {
         let clone = &clones[*i];
         let is_drop = clone.name.ends_with(".drop");
         // The recorded reason is the bare diagnostic message, so strip the
         // `file:line: error: ` anchor a propagated astgen error carries.
         let bare_reason = |e: &str| -> String {
-            match e.split_once(": error: ") {
-                Some((_, msg)) => msg.to_string(),
-                None => e.to_string(),
-            }
+            let msg = match e.split_once(": error: ") {
+                Some((_, msg)) => msg,
+                None => e,
+            };
+            msg.strip_prefix("astgen: ").unwrap_or(msg).to_string()
         };
         // (1) Body that fails to lower for these type args is a CONDITIONAL
         // WITHDRAWAL: drop it from the registry, record the reason for
         // call-site replay, skip its body, keep going.
-        if let Err(e) = astgen_body_into(jfn, clone, ctx)
-            && !is_drop
-        {
+        if let Err(e) = astgen_body_into(jfn, clone, ctx) {
+            if is_drop {
+                drop_error(&jfn.name, &bare_reason(&e));
+                withdrawn.insert(jfn.name.clone());
+                continue;
+            }
             ctx.unregister_function_ast(&clone.name);
             ctx.record_withdrawn_method(&clone.name, bare_reason(&e));
+            withdrawn.insert(jfn.name.clone());
             continue;
         }
         // (2) Move/ownership WITHDRAWAL: even when the body lowers, a
@@ -9110,6 +10033,7 @@ pub fn instantiate_methods(
             if let Some(first) = adiags.first() {
                 ctx.unregister_function_ast(&clone.name);
                 ctx.record_withdrawn_method(&clone.name, first.message.clone());
+                withdrawn.insert(jfn.name.clone());
                 continue;
             }
         }
@@ -9137,14 +10061,92 @@ pub fn instantiate_methods(
             Some(&ctx.string_pool),
             Some(&resolver),
         );
-        if let Some(first) = vdiags.first()
-            && !is_drop
-        {
+        if let Some(first) = vdiags.first() {
+            if is_drop {
+                drop_error(&jfn.name, &first.message);
+                withdrawn.insert(jfn.name.clone());
+                continue;
+            }
             ctx.unregister_function_ast(&clone.name);
             ctx.record_withdrawn_method(&clone.name, first.message.clone());
+            withdrawn.insert(jfn.name.clone());
             continue;
         }
-        let _ = jir_define_body(jfn, ctx);
+        // A body that can't be lowered (a callee not declared yet, e.g. an
+        // imported fn returning a payload enum, used while the type bodies
+        // are still being filled) is withdrawn like one that fails to verify,
+        // and its half-built LLVM body removed so it can't crash the backend.
+        if let Err(e) = jir_define_body(jfn, ctx) {
+            // Keep the symbol defined (sibling methods already lowered may call
+            // it): an unreachable body, never reached because the method is
+            // withdrawn and a call to it is a compile error.
+            if is_drop {
+                drop_error(&jfn.name, &e);
+                withdrawn.insert(jfn.name.clone());
+                continue;
+            }
+            if let Some(f) = ctx.module().get_function(&jfn.name) {
+                f.make_unreachable(ctx.builder());
+            }
+            let e = e.strip_prefix("astgen: ").unwrap_or(&e);
+            let reason = format!("its body could not be compiled for this instantiation ({e})");
+            {
+                ctx.unregister_function_ast(&clone.name);
+                ctx.record_withdrawn_method(&clone.name, reason);
+                withdrawn.insert(jfn.name.clone());
+            }
+        }
+    }
+    // Cascade: a method whose body calls a withdrawn sibling can't run either.
+    loop {
+        let mut changed = false;
+        for (jfn, i) in &built {
+            let clone = &clones[*i];
+            if withdrawn.contains(&jfn.name) {
+                continue;
+            }
+            let calls_withdrawn = jfn.insts.iter().find_map(|inst| {
+                if inst.tag != JirTag::Call {
+                    return None;
+                }
+                let callee = String::from_utf8_lossy(
+                    &ctx.string_pool.get(jam_core::index::StringIdx::new(inst.a)),
+                )
+                .into_owned();
+                withdrawn.contains(&callee).then_some(callee)
+            });
+            let Some(callee) = calls_withdrawn else {
+                continue;
+            };
+            if clone.name.ends_with(".drop") {
+                let callee_why = ctx.get_withdrawn_method(&callee).unwrap_or_default();
+                drop_error(
+                    &jfn.name,
+                    &format!(
+                        "it calls `{callee}`, which is not available for this instantiation ({callee_why})"
+                    ),
+                );
+                withdrawn.insert(jfn.name.clone());
+                changed = true;
+                continue;
+            }
+            if let Some(f) = ctx.module().get_function(&jfn.name) {
+                f.make_unreachable(ctx.builder());
+            }
+            ctx.unregister_function_ast(&clone.name);
+            let callee_why = ctx.get_withdrawn_method(&callee).unwrap_or_default();
+            ctx.record_withdrawn_method(
+                &clone.name,
+                format!(
+                    "it calls `{callee}`, which is not available for this instantiation ({callee_why})"
+                ),
+            );
+            withdrawn.insert(jfn.name.clone());
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
     }
     ctx.pop_subst();
     Ok(())
