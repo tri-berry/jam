@@ -1,0 +1,61 @@
+// A generic struct's methods, instantiated here, read their own module's
+// consts (not this file's same-named ones), while type arguments keep
+// meaning what they mean here. Destructured consts, also
+// through a re-export handle, and `comp const`s fold in their module.
+
+const g = import("mod_generic_consts");
+const { Wrap, M, R } = import("mod_generic_consts");
+const { N3 } = import("mod_generic_thing");
+const { LIMIT } = import("mod_generic_consts_reexport").g;
+
+const c = import("mod_generic_thing");
+const Node = struct { a: i64, b: i64, d: i64 };
+
+// Same names as the helper module, different values.
+comp const K = 100;
+comp const STEP = 50;
+comp const LEN = 2;
+fn base() i64 { return 1; }
+
+tfn instantiatedMethodsUseTheirModule() {
+    var w = g.Wrap(i64) { v: 2 };
+    assert(w.cap(), 6);
+    assert(w.step(), 9);
+    var d = Wrap(i32) { v: 1 };
+    assert(d.cap(), 6);
+}
+
+tfn destructuredCompConstsFoldInTheirModule() {
+    assert(M, 4);
+    assert(R, 13);
+    assert(K, 100);
+}
+
+tfn destructuredThroughReexportHandle() {
+    var l: i64 = LIMIT;
+    assert(l, 5);
+}
+
+tfn typeArgumentsResolveWhereWritten() {
+    var h = g.H(c.Thing) { v: c.Thing { x: 1, y: 1 } };
+    assert(h.made(), 2);
+    var n = g.H(Node) { v: Node { a: 1, b: 2, d: 3 } };
+    assert(n.size(), 24);
+    // The instance's field and method signature are this file's `Node` too,
+    // not the helper module's private 8-byte one.
+    assert(@sizeOf(g.H(Node)) as i64, 24);
+    assert(n.get().d, 3);
+}
+
+tfn comptimeLengthsAndFnsUseTheDefiningModule() {
+    var f = g.Filler(i64) { v: 0 };
+    assert(f.last(), 9);
+    assert(f.mixed(), 45);
+}
+
+tfn destructuredCompConstAsArrayLength() {
+    var r = [7; N3];
+    var z: [N3]u8 = [1, 2, 3];
+    assert(r[2], 7);
+    assert(z[2], 3);
+}

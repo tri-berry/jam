@@ -1,0 +1,5 @@
+// See mod_handle_gen.jam.
+pub const K: i64 = 10;
+pub fn f() i64 { return 100; }
+pub const Thing = struct { x: i64, y: i64 };
+pub const U = union { a: [4]i64, b: i64 };

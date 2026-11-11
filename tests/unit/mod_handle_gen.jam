@@ -1,0 +1,23 @@
+// Helper for test_generic_method_handles.jam: a generic whose methods use
+// this module's import handle `h`, named like a handle of the test file.
+const h = import("mod_handle_gen_a");
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn viaFn(self: Self) i64 { return h.f(); }
+        pub fn viaConst(self: Self) i64 { return h.K; }
+    };
+}
+
+// A nested generic over a handle-qualified type, in a method body and in a
+// field: `h` here is this module's handle, not the test file's.
+pub fn Box(T: type) type { return struct { t: T }; }
+pub fn S(T: type) type {
+    return struct {
+        v: T,
+        b: Box(h.Thing),
+        pub fn boxSize(self: Self) i64 { return @sizeOf(Box(h.Thing)) as i64; }
+        pub fn unionSize(self: Self) i64 { return @sizeOf(h.U) as i64; }
+    };
+}
+pub fn plainBoxSize() i64 { return @sizeOf(Box(h.Thing)) as i64; }

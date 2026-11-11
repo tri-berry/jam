@@ -1,0 +1,5 @@
+// Decoy for test_generic_method_handles.jam.
+pub const K: i64 = 20;
+pub fn f() i64 { return 200; }
+pub const Thing = struct { x: u8 };
+pub const U = union { a: u8 };

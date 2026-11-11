@@ -1,0 +1,20 @@
+// A generic method's import handles are its defining module's, even when
+// the instantiating file has a handle of the same name.
+const g = import("mod_handle_gen");
+const h = import("mod_handle_gen_b");
+const ha = import("mod_handle_gen_a");
+
+tfn handlesInGenericMethodsResolveInTheDefiningModule() {
+    var x = g.G(i64) { v: 0 };
+    assert(x.viaFn(), 100);
+    assert(x.viaConst(), 10);
+    assert(h.f(), 200);
+}
+
+tfn nestedGenericsOverHandleTypesUseTheWritingModule() {
+    var s = g.S(i64) { v: 0, b: g.Box(ha.Thing) { t: ha.Thing { x: 1, y: 2 } } };
+    assert(s.boxSize(), 16);
+    assert(s.unionSize(), 32);
+    assert(g.plainBoxSize(), 16);
+    assert(@sizeOf(g.S(i64)) as i64, 24);
+}

@@ -1,0 +1,21 @@
+// Helper for test_generic_instances.jam: a generic whose parameter is named
+// like a type of this module, and one whose method builds another generic
+// instance over its parameter.
+const { Option } = import("std/option");
+pub const Item = struct { z: u8 };
+pub fn Box(Item: type) type {
+    return struct {
+        v: Item,
+        pub fn get(self: Self) Item { return self.v; }
+    };
+}
+pub fn Pair(T: type) type { return struct { a: T, b: T }; }
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn o2(self: Self) Option(Pair(T)) {
+            var p = Pair(T) { a: self.v, b: self.v };
+            return Option(Pair(T)).Some(p);
+        }
+    };
+}

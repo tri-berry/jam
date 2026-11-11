@@ -1,0 +1,22 @@
+// Same as test_export_generic_instance.jam, but the C crossing names the
+// instance through an alias (`const P = H(i64)`) and inside an array: the
+// early agreement check must see through both and not instantiate early.
+fn helper() i64 { return 40; }
+fn H(T: type) type {
+    return struct {
+        v: T,
+        w: T,
+        x: T,
+        fn get(self: Self) i64 { return helper() + self.v; }
+    };
+}
+const P = H(i64);
+extern fn c_take(h: P) i64;
+export fn jam_sum_ps(ps: [2]P) i64 { return ps[0].v + ps[1].v; }
+
+tfn aliasedInstanceMethodsWork() {
+    var h = H(i64) { v: 2, w: 0, x: 0 };
+    assert(h.get(), 42);
+    var ps: [2]P = [P { v: 1, w: 0, x: 0 }, P { v: 2, w: 0, x: 0 }];
+    assert(jam_sum_ps(ps), 3);
+}

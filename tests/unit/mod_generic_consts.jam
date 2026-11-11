@@ -1,0 +1,44 @@
+// Helper for test_generic_method_module_scope.jam: a generic struct whose
+// methods read this module's consts, and a re-export handle whose name
+// differs from its import path.
+pub const LIMIT: i64 = 5;
+comp const STEP = 3;
+comp const K = 3;
+pub comp const M = K + 1;
+pub const R: i64 = K + 10;
+pub fn Wrap(T: type) type {
+    return struct {
+        v: T,
+        pub fn cap(self: Self) i64 { return LIMIT + 1; }
+        pub fn step(self: Self) i64 { return STEP * 3; }
+    };
+}
+
+// A handle and a type named like the test file's, to catch type arguments
+// resolved in this module instead of where they were written.
+const c = import("mod_generic_decoy");
+const Node = struct { n: i64 };
+pub fn H(T: type) type {
+    return struct {
+        v: T,
+        pub fn made(self: Self) i64 { return T.mk().y; }
+        pub fn size(self: Self) i64 { return @sizeOf(T) as i64; }
+        pub fn get(self: Self) T { return self.v; }
+    };
+}
+
+// Comptime lengths and bare fn calls in a generic method use this module.
+comp const LEN = 10;
+fn base() i64 { return 40; }
+pub fn Filler(T: type) type {
+    return struct {
+        v: T,
+        pub fn last(self: Self) i64 {
+            var buf: [LEN]i64 = [0; LEN];
+            var i: i64 = 0;
+            while (i < LEN) { buf[i] = i; i = i + 1; }
+            return buf[LEN - 1];
+        }
+        pub fn mixed(self: Self) i64 { return base() + LIMIT; }
+    };
+}

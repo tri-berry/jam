@@ -1,0 +1,12 @@
+// Destructuring a module's type alias of a generic instance (`pub const
+// P = H(i64)`) used to instantiate `H(i64)` before the module's fns were
+// declared, so its methods were withdrawn ("unknown callee `helper`").
+const m = import("mod_alias_generic");
+const { P } = import("mod_alias_generic");
+
+tfn destructuredAliasKeepsMethods() {
+    var h = m.H(i64) { v: 2, w: 0, x: 0 };
+    assert(h.get(), 42);
+    var p = P { v: 1, w: 0, x: 0 };
+    assert(p.get(), 41);
+}

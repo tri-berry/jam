@@ -1,0 +1,16 @@
+// An `export fn` passing a generic instance by value doesn't break the
+// instance's methods (classifying it for the C ABI instantiated it before
+// the functions its methods call were declared).
+fn helper() i64 { return 40; }
+fn H(T: type) type {
+    return struct {
+        v: T,
+        fn get(self: Self) i64 { return helper() + self.v; }
+    };
+}
+export fn mkH(n: i64) H(i64) { return H(i64) { v: n }; }
+
+tfn exportedInstanceMethodsWork() {
+    var h = mkH(2);
+    assert(h.get(), 42);
+}

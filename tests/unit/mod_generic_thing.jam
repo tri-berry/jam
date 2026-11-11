@@ -1,0 +1,9 @@
+// Type argument source for test_generic_method_module_scope.jam.
+pub const Thing = struct {
+    x: i64,
+    y: i64,
+    pub fn mk() Thing { return Thing { x: 0, y: 2 }; }
+};
+
+pub comp const N3 = 3;
+pub comp const K3 = 3;

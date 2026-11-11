@@ -1,0 +1,50 @@
+// Generic instances: a parameter named like a type of the defining module
+// is still the parameter; two instances of a method building `Pair(T)` each
+// build their own `Pair`; `Option` and `Vec` of a struct with a droppable
+// field drop it; and comptime lengths mix cfn calls and consts.
+const { Option } = import("std/option");
+const { Vec } = import("std/collections");
+const m = import("mod_generic_param_names");
+
+const Node = struct { a: i64, kids: Vec(i64) };
+
+cfn fib(n: i64) i64 {
+    if (n < 2) { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+const A = 1;
+const B = 1;
+const C = 1;
+
+tfn parameterNamedLikeAModuleType() {
+    var b = m.Box(i64) { v: 300 };
+    assert(@sizeOf(m.Box(i64)) as i64, 8);
+    assert(b.get(), 300);
+}
+
+tfn eachInstanceBuildsItsOwnPair() {
+    var g = m.G(i64) { v: 5 };
+    var h = m.G(u8) { v: 7 };
+    var r: i64 = 0;
+    match (h.o2()) { Some(p) { r = p.b as i64; } None { r = 99; } }
+    assert(r, 7);
+    match (g.o2()) { Some(p) { r = p.a; } None { r = 99; } }
+    assert(r, 5);
+}
+
+tfn optionAndVecOfStructWithDroppableField() {
+    var k = Vec(i64).empty();
+    k.push(1);
+    var o = Option(Node).Some(Node { a: 3, kids: k });
+    var v = Vec(Node).empty();
+    var k2 = Vec(i64).empty();
+    k2.push(2);
+    v.push(Node { a: 4, kids: k2 });
+    var got: i64 = 0;
+    match (v.pop()) { Some(n) { got = n.a; } None { got = 99; } }
+    assert(got, 4);
+}
+
+tfn comptimeLengthWithCfnAndConsts() {
+    assert(@sizeOf([fib(20) - 6765 + A + B + C]u8) as i64, 3);
+}

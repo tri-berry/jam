@@ -1,0 +1,95 @@
+// Pointer and slice locals of generic instance types inside a generic body,
+// a user type named `T` passed to a generic whose parameter is `T`, generic
+// enum variants with several payloads, and `mut` method parameters (which
+// used to be passed by value and crash).
+const { Vec } = import("std/collections");
+
+const T = struct { a: i64 };
+
+const D = struct {
+    n: i64,
+    c: *mut i64,
+    cfn drop(self: mut Self) { self.c.* = self.c.* + self.n; }
+};
+
+fn Pair(U: type) type { return struct { a: U, b: U }; }
+fn G(U: type) type {
+    return struct {
+        v: U,
+        pub fn viaPtrs(self: Self, x: U, y: U) i64 {
+            var v: Vec(U) = Vec(U).empty();
+            v.push(x);
+            var pv: *mut Vec(U) = &v;
+            var p = Pair(U) { a: y, b: y };
+            var pp: *const Pair(U) = &p;
+            var arr: [2]Pair(U) = [p, p];
+            var s: []Pair(U) = arr[0..2];
+            return (pv.*.len() as i64) + (s.len as i64);
+        }
+        pub fn sw(self: Self, a: mut U, b: mut U) { swap(U, a, b); }
+    };
+}
+fn swap(U: type, a: mut U, b: mut U) { var t = a; a = b; b = t; }
+
+fn W(U: type) type { return enum { X(i64, U), Z }; }
+
+const S = struct {
+    v: i64,
+    pub fn bump(self: Self, x: mut i64) { x = x + self.v; }
+};
+
+tfn pointerAndSliceLocalsInGenericBodies() {
+    var g = G(u8) { v: 1 };
+    assert(g.viaPtrs(1, 2), 3);
+}
+
+tfn userTypeNamedLikeTheParameter() {
+    var v: Vec(T) = Vec(T).empty();
+    v.push(T { a: 5 });
+    assert(v.at(0).a, 5);
+}
+
+tfn genericEnumVariantKeepsEveryPayload() {
+    var w = W(i64).X(3, 40);
+    var r: i64 = 0;
+    match (w) { X(a, b) { r = a + b; } Z { r = 99; } }
+    assert(r, 43);
+}
+
+fn dropPayload(c: *mut i64) { var w = W(D).X(3, D { n: 7, c: c }); }
+
+tfn genericEnumDropsItsSecondPayload() {
+    var drops: i64 = 0;
+    dropPayload(&drops);
+    assert(drops, 7);
+}
+
+tfn mutMethodParamsArePointers() {
+    var s = S { v: 3 };
+    var i: i64 = 1;
+    s.bump(i);
+    assert(i, 4);
+    var g = G(i64) { v: 0 };
+    var i1: i64 = 1;
+    var i2: i64 = 2;
+    g.sw(i1, i2);
+    assert(i1, 2);
+    assert(i2, 1);
+}
+
+fn H(U: type) type {
+    return struct {
+        v: U,
+        pub fn st(x: mut U) { x = x + 1; }
+        pub fn bump(self: Self, x: mut U) { x = x + self.v; }
+    };
+}
+
+tfn mutParamsThroughTypeMethodCalls() {
+    var i: i64 = 1;
+    H(i64).st(i);
+    assert(i, 2);
+    var h = H(i64) { v: 5 };
+    H(i64).bump(h, i);
+    assert(i, 7);
+}

@@ -1,0 +1,2 @@
+// Re-exports mod_generic_consts under a handle named unlike its path.
+pub const g = import("mod_generic_consts");

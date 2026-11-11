@@ -1,0 +1,9 @@
+// A generic enum variant takes exactly its payload values (extra or missing
+// ones used to be dropped or read as garbage).
+// expect-error: takes 2 payload value(s), 1 given
+
+fn W(U: type) type { return enum { X(i64, U), Z }; }
+
+fn main() {
+    var w = W(i64).X(3);
+}

@@ -1,0 +1,7 @@
+// Decoy for test_generic_method_module_scope.jam: same `Thing` shape as
+// mod_generic_thing.jam, different value.
+pub const Thing = struct {
+    x: i64,
+    y: i64,
+    pub fn mk() Thing { return Thing { x: 0, y: 99 }; }
+};

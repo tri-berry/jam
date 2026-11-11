@@ -1,0 +1,11 @@
+// For test_destructure_generic_alias.jam.
+fn helper() i64 { return 40; }
+pub fn H(T: type) type {
+    return struct {
+        v: T,
+        w: T,
+        x: T,
+        pub fn get(self: Self) i64 { return helper() + self.v; }
+    };
+}
+pub const P = H(i64);
