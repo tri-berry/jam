@@ -127,6 +127,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `void` spells "returns nothing" in return position, so a module-level
+    /// type or const can't take the name (it would be silently ignored there).
+    fn reject_void_type_name(&mut self) -> PResult<()> {
+        if self.prev_text() == b"void" {
+            return Err(self.parse_error("`void` is reserved and can't name a type or constant"));
+        }
+        Ok(())
+    }
+
     /// Raw source bytes of the most-recently-consumed token.
     fn prev_text(&self) -> &[u8] {
         self.tokens[self.current - 1].text(&self.source)
@@ -1991,6 +2000,32 @@ impl<'a> Parser<'a> {
     // Types
     // ===================================================================
 
+    /// A return type, only when the next token can start one. `void` is the
+    /// same as none, so `fn f() void` and `fn f()` (and the fn types
+    /// `fn() void` and `fn()`) agree.
+    fn parse_opt_return_type(&mut self) -> PResult<TypeIdx> {
+        if !matches!(
+            self.peek_type(),
+            TokenType::Type
+                | TokenType::OpenBracket
+                | TokenType::Const
+                | TokenType::Identifier
+                | TokenType::Star
+                | TokenType::Fn
+        ) {
+            return Ok(TypeIdx::NONE);
+        }
+        // `void` lexes as an identifier (it isn't a type keyword).
+        if self.check(TokenType::Identifier)
+            && self.tokens[self.current].text(&self.source) == b"void"
+        {
+            self.advance();
+            return Ok(TypeIdx::NONE);
+        }
+        let t = self.parse_type()?;
+        Ok(if t == builtin::VOID { TypeIdx::NONE } else { t })
+    }
+
     fn parse_type(&mut self) -> PResult<TypeIdx> {
         // (1) `fn(T1, T2, ...) Ret` function type.
         if self.match_(TokenType::Fn) {
@@ -2006,7 +2041,9 @@ impl<'a> Parser<'a> {
                 TokenType::CloseParen,
                 "Expected `)` after fn-type parameters",
             )?;
-            let ret = self.parse_type()?;
+            // Like a fn declaration, the return type may be omitted (and
+            // `void` spells the same "returns nothing").
+            let ret = self.parse_opt_return_type()?;
             return Ok(self.type_pool.intern_fn(ret, params));
         }
         // (2) `*const|*mut [optional []] T` pointer. Mutability is not encoded
@@ -2216,19 +2253,7 @@ impl<'a> Parser<'a> {
         }
         self.consume(TokenType::CloseParen, "Expected ')' after parameters")?;
 
-        // Return type only when the next token can start one.
-        let return_type = if matches!(
-            self.peek_type(),
-            TokenType::Type
-                | TokenType::OpenBracket
-                | TokenType::Const
-                | TokenType::Identifier
-                | TokenType::Star
-        ) {
-            self.parse_type()?
-        } else {
-            TypeIdx::NONE
-        };
+        let return_type = self.parse_opt_return_type()?;
 
         if is_extern {
             self.consume(
@@ -2302,6 +2327,7 @@ impl<'a> Parser<'a> {
     fn parse_struct_decl(&mut self) -> PResult<StructDeclAST> {
         self.consume(TokenType::Const, "Expected 'const' for struct declaration")?;
         self.consume(TokenType::Identifier, "Expected struct name")?;
+        self.reject_void_type_name()?;
         let name = String::from_utf8_lossy(self.prev_text()).into_owned();
         self.consume(TokenType::Equal, "Expected '=' after struct name")?;
         self.consume(TokenType::Struct, "Expected 'struct' keyword")?;
@@ -2319,6 +2345,7 @@ impl<'a> Parser<'a> {
         use crate::ast::EnumVariantAST;
         self.consume(TokenType::Const, "Expected 'const' for enum declaration")?;
         self.consume(TokenType::Identifier, "Expected enum name")?;
+        self.reject_void_type_name()?;
         let name = String::from_utf8_lossy(self.prev_text()).into_owned();
         self.consume(TokenType::Equal, "Expected '=' after enum name")?;
         self.consume(TokenType::Enum, "Expected 'enum' keyword")?;
@@ -2474,6 +2501,7 @@ impl<'a> Parser<'a> {
     fn parse_union_decl(&mut self) -> PResult<UnionDeclAST> {
         self.consume(TokenType::Const, "Expected 'const' for union declaration")?;
         self.consume(TokenType::Identifier, "Expected union name")?;
+        self.reject_void_type_name()?;
         let name = String::from_utf8_lossy(self.prev_text()).into_owned();
         self.consume(TokenType::Equal, "Expected '=' after union name")?;
         self.consume(TokenType::Union, "Expected 'union' keyword")?;
@@ -2506,6 +2534,7 @@ impl<'a> Parser<'a> {
             TokenType::Identifier,
             "Expected identifier for constant name",
         )?;
+        self.reject_void_type_name()?;
         let name = String::from_utf8_lossy(self.prev_text()).into_owned();
         let declared = if self.match_(TokenType::Colon) {
             self.parse_type()?
