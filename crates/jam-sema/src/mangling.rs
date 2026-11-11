@@ -51,6 +51,12 @@ pub fn mangled_function_name(f: &FunctionAST, types: &TypePool, strings: &String
                 let ni = jam_core::index::StringIdx::new(k.a);
                 if !ni.is_none() {
                     let recv = String::from_utf8_lossy(&strings.get(ni)).into_owned();
+                    // In an imported module, qualified like an in-struct
+                    // drop (`ma.A.drop`): two modules' own `A`s (or an entry
+                    // `A` with an in-struct drop) must not share a symbol.
+                    if !f.module_path.is_empty() && !recv.contains('.') {
+                        return format!("{}.{recv}.drop", f.module_path);
+                    }
                     return format!("{recv}.drop");
                 }
             }
