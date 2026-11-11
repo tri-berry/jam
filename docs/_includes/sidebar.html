@@ -1,0 +1,29 @@
+<aside class="sidebar" id="sidebar">
+    <a href="{{ '/' | relative_url }}" class="sidebar-logo" aria-label="Jam home">
+        <img src="{{ '/assets/images/logo.png' | relative_url }}" alt="Jam">
+    </a>
+
+    <label class="search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input type="search" id="search" placeholder="Search" autocomplete="off" spellcheck="false">
+        <kbd>⌘K</kbd>
+    </label>
+
+    <nav class="sidebar-nav">
+        {% for group in site.data.nav %}
+        <div class="nav-group">
+            {% if group.title %}<h5>{{ group.title }}</h5>{% endif %}
+            <ul>
+                {% for item in group.items %}
+                <li><a href="{{ item.url | relative_url }}"{% if item.url == page.url %} class="active"{% endif %}>{{ item.name }}</a></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endfor %}
+    </nav>
+
+    <div class="sidebar-foot">
+        <a href="https://github.com/raphamorim/jam">GitHub</a>
+        <span>v{{ site.version }}</span>
+    </div>
+</aside>

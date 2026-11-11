@@ -1,0 +1,65 @@
+- items:
+    - name: About
+      url: /
+    - name: Installation
+      url: /installation/
+    - name: Language Reference
+      url: /reference/
+- title: Basics
+  items:
+    - name: Variables & Constants
+      url: /reference/#variables
+    - name: Integer Types
+      url: /reference/#types
+    - name: Booleans
+      url: /reference/#bool
+    - name: Strings
+      url: /reference/#strings
+    - name: Pointers & Slices
+      url: /reference/#pointers
+    - name: Arrays
+      url: /reference/#arrays
+- title: Control & Functions
+  items:
+    - name: Control Flow
+      url: /reference/#control-flow
+    - name: Functions
+      url: /reference/#fn-declaration
+    - name: Type Casts
+      url: /reference/#casts
+    - name: Function Pointers
+      url: /reference/#fn-pointers
+- title: Types
+  items:
+    - name: Structs
+      url: /reference/#structs
+    - name: Enums
+      url: /reference/#enums
+    - name: Unions
+      url: /reference/#unions
+    - name: Pattern Matching
+      url: /reference/#match
+    - name: Generics
+      url: /reference/#generics
+- title: System
+  items:
+    - name: Compile-Time Execution
+      url: /reference/#comptime
+    - name: Testing
+      url: /reference/#testing
+    - name: Modules & Imports
+      url: /reference/#imports
+    - name: Comptime Intrinsics
+      url: /reference/#intrinsics
+    - name: extern / FFI
+      url: /reference/#extern
+- title: Mutable Value Semantics
+  items:
+    - name: Overview
+      url: /reference/#mvs-overview
+    - name: Parameter Modes
+      url: /reference/#mvs-modes
+    - name: Exclusivity
+      url: /reference/#mvs-exclusivity
+    - name: Drop
+      url: /reference/#mvs-drop
