@@ -56,21 +56,21 @@ signature, so call sites carry no sigils.
 The compiler enforces definite initialization, exclusivity and linear drops. That
 rules out use-after-free, double-free, data races and reads of uninitialized memory,
 with no lifetime annotations to write. See
-[Mutable Value Semantics]({{ '/reference/#mvs-overview' | relative_url }}).
+[Mutable Value Semantics]({{ '/reference/value-semantics/' | relative_url }}).
 
 ## What's in the language
 
 - **Structs, enums and unions.** Enums carry payloads and are taken apart with
-  [`match`]({{ '/reference/#match' | relative_url }}).
+  [`match`]({{ '/reference/data-types/#match' | relative_url }}).
 - **Generics as functions.** A generic type is a function from types to a type,
-  evaluated at compile time. See [Generics]({{ '/reference/#generics' | relative_url }}).
+  evaluated at compile time. See [Generics]({{ '/reference/data-types/#generics' | relative_url }}).
 - **Compile-time execution.** Code can run in the compiler, at compile time. See
-  [Compile-Time Execution]({{ '/reference/#comptime' | relative_url }}).
+  [Compile-Time Execution]({{ '/reference/compile-time/#comptime' | relative_url }}).
 - **Tests built in.** `tfn` declares a test and `jam test` runs every one of them.
-  See [Testing]({{ '/reference/#testing' | relative_url }}).
+  See [Testing]({{ '/reference/modules/#testing' | relative_url }}).
 - **C interop.** `extern fn` calls C and `export fn` is callable from C, with structs
   passed by value under the platform's C ABI. See
-  [extern / FFI]({{ '/reference/#extern' | relative_url }}).
+  [extern / FFI]({{ '/reference/modules/#extern' | relative_url }}).
 
 ## The compiler
 
