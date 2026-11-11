@@ -1,0 +1,8 @@
+// Two modules exporting one symbol are two definitions of it (they used to
+// be merged into one function, every caller getting the first body).
+// expect-error: symbol `jam_dup` is defined twice (module `mod_export_dup_a` and module `mod_export_dup_b`)
+
+const a = import("mod_export_dup_a");
+const b = import("mod_export_dup_b");
+
+fn main() {}

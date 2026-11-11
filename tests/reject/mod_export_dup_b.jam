@@ -1,0 +1,2 @@
+// Helper for reject_export_defined_twice.jam.
+pub export fn jam_dup(a: i64) i64 { return a * 5; }

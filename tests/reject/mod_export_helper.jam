@@ -1,0 +1,2 @@
+// Helper for reject_entry_fn_clashes_with_export.jam.
+pub export fn helper_sym(a: i64) i64 { return a + 20; }

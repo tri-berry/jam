@@ -1,0 +1,11 @@
+// Two declarations of one C symbol that disagree on a return passed in
+// memory are reported as a conflict, before any call is lowered against the
+// wrong prototype (that used to fail with an internal codegen error).
+// expect-error: extern `c_k` is declared twice with different signatures
+
+const a = import("mod_extern_big_ret");
+extern fn c_k(x: i64) i64;
+
+fn main() {
+    var r: i64 = a.fa() + c_k(3);
+}

@@ -1,0 +1,14 @@
+// Helper for test_std_generic_externs.jam: a module with its own private
+// `malloc`/`free` that instantiates std's Vec. Vec must still call C's.
+const { Vec } = import("std/collections");
+fn free(p: *mut[] u8) {}
+fn malloc(size: u64) *mut[] u8 { var a: u64 = 0; return a as *mut[] u8; }
+pub fn run() i64 {
+    var v = Vec(i64).empty();
+    var i: i64 = 0;
+    while (i < 100) { v.push(i); i = i + 1; }
+    var s: i64 = 0;
+    var j: u32 = 0;
+    while (j < 100) { s = s + v.asSlice()[j]; j = j + 1; }
+    return s;
+}

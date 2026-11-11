@@ -1,0 +1,63 @@
+// By-value structs across the C boundary on direct `extern fn` calls and
+// `export fn` prototypes. These used to skip C-ABI classification
+// (only `@callC` ran abi::classify_c_abi): an 8-byte struct return came
+// back as garbage, a >16-byte return passed its sret slot as a plain
+// first argument (x0, not x8), and C calling an `export fn` with a small
+// struct parameter faulted because the body read the packed value as a
+// pointer. Now externs are declared with C classes and exports get a
+// C-ABI wrapper over their Jam-ABI body.
+
+const { assert } = import("test");
+
+// libc: div_t is { int quot; int rem; } (8 bytes, one GP word);
+// ldiv_t is { long quot; long rem; } (16 bytes, two GP words).
+const DivT = struct { quot: i32, rem: i32 };
+const LDivT = struct { quot: i64, rem: i64 };
+extern fn div(num: i32, den: i32) DivT;
+extern fn ldiv(num: i64, den: i64) LDivT;
+
+const Pair = struct { a: i32, b: i32 };
+const Big = struct { a: i64, b: i64, c: i64, d: i64 };
+const Dbl = struct { x: f64, y: f64 };
+
+export fn abiMakePair(a: i32, b: i32) Pair { return Pair { a: a, b: b }; }
+export fn abiPairSum(p: Pair, k: i32) i32 { return p.a * 100 + p.b * 10 + k; }
+export fn abiMakeBig(x: i64) Big { return Big { a: x, b: x + 1, c: x + 2, d: x + 3 }; }
+export fn abiBigSum(g: Big) i64 { return g.a + g.b + g.c + g.d; }
+export fn abiHalf(x: f64) Dbl { return Dbl { x: x, y: x / 2.0 }; }
+
+tfn externSmallStructReturn() {
+    var r: DivT = div(17, 5);
+    assert(r.quot, 3);
+    assert(r.rem, 2);
+}
+
+tfn externTwoWordStructReturn() {
+    var r: LDivT = ldiv(-17, 5);
+    assert(r.quot, -3);
+    assert(r.rem, -2);
+}
+
+tfn exportCalledFromJamUsesBody() {
+    var p: Pair = abiMakePair(4, 5);
+    assert(abiPairSum(p, 6), 456);
+    var g: Big = abiMakeBig(10);
+    assert(g.d, 13);
+    assert(abiBigSum(g), 46);
+}
+
+tfn exportAddressIsCAbiWrapper() {
+    // `fn as u64` is the exported symbol: the C-ABI wrapper. @callC calls
+    // it the way C would.
+    var p: Pair = @callC(Pair, abiMakePair as u64, 7 as i32, 8 as i32);
+    assert(p.a, 7);
+    assert(p.b, 8);
+    assert(@callC(i32, abiPairSum as u64, p, 9 as i32), 789);
+    var g: Big = @callC(Big, abiMakeBig as u64, 1 as i64);
+    assert(g.a, 1);
+    assert(g.d, 4);
+    var d: Dbl = @callC(Dbl, abiHalf as u64, 3.0);
+    var ok: u32 = 0;
+    if (d.x == 3.0 && d.y == 1.5) { ok = 1; }
+    assert(ok, 1);
+}

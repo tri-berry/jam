@@ -1,0 +1,2 @@
+pub const Q = struct { x: f64, y: f64 };
+pub extern fn c_conflict(q: Q) f64;

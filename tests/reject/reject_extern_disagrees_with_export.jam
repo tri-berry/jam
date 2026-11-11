@@ -1,0 +1,10 @@
+// An extern declaring a symbol another module exports must agree with the
+// export (it used to take the export's signature silently).
+// expect-error: extern `jam_wide` is declared twice with different signatures
+
+const m = import("mod_export_wide");
+extern fn jam_wide(x: i8) i8;
+
+fn main() {
+    var r: i8 = jam_wide(1);
+}

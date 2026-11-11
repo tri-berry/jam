@@ -1,0 +1,9 @@
+// Two modules declaring one C symbol must agree on how its values cross
+// the boundary (here each module's own `Q` has a different layout, which
+// shared one prototype silently).
+// expect-error: extern `c_conflict` is declared twice with different signatures
+
+const a = import("mod_extern_conflict_a");
+const b = import("mod_extern_conflict_b");
+
+fn main() {}

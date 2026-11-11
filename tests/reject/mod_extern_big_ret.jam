@@ -1,0 +1,5 @@
+// Helper for reject_extern_conflict_memory_return.jam: an extern returning a
+// struct the C ABI passes in memory (over 16 bytes).
+pub const Q = struct { x: i64, y: i64, z: i64 };
+pub extern fn c_k(q: Q) Q;
+pub fn fa() i64 { var q: Q = c_k(Q { x: 1, y: 2, z: 3 }); return q.x; }

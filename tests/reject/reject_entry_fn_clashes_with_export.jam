@@ -1,0 +1,9 @@
+// The entry module's functions keep their bare symbol, like exports, so an
+// entry `fn` and a module's `export fn` of one name clash (the module's own
+// calls used to reach the entry's function).
+// expect-error: symbol `helper_sym` is defined twice (the entry module and module `mod_export_helper`)
+
+const m = import("mod_export_helper");
+fn helper_sym(a: i64) i64 { return a + 10; }
+
+fn main() {}

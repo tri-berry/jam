@@ -1,0 +1,8 @@
+// A std generic's method calls the externs its own module declares (C
+// `malloc`), not a same-named private fn of the module instantiating it
+// (that used to return null and crash).
+const u = import("mod_user_malloc");
+
+tfn vecUsesCMallocDespiteUserMalloc() {
+    assert(u.run(), 4950);
+}
