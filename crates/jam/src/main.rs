@@ -10,6 +10,19 @@ mod cli;
 use std::env;
 
 fn main() {
+    // Compile on a thread with a large stack: lowering and comptime folding
+    // recurse along the program (a long chain of consts folds one level per
+    // const), which the default 8 MiB main stack can't always hold.
+    let worker = std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(real_main)
+        .expect("spawn the compiler thread");
+    if worker.join().is_err() {
+        std::process::exit(101);
+    }
+}
+
+fn real_main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
