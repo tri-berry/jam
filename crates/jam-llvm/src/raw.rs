@@ -360,6 +360,12 @@ unsafe extern "C" {
         KindID: c_uint,
     ) -> LLVMAttributeRef;
     pub fn LLVMGetTypeAttributeValue(A: LLVMAttributeRef) -> LLVMTypeRef;
+    pub fn LLVMGetStringAttributeAtIndex(
+        F: LLVMValueRef,
+        Idx: LLVMAttributeIndex,
+        K: *const c_char,
+        KLen: c_uint,
+    ) -> LLVMAttributeRef;
 
     // ---- basic blocks / iteration / misc ----
     pub fn LLVMCreateBasicBlockInContext(
@@ -374,6 +380,14 @@ unsafe extern "C" {
     pub fn LLVMGetBasicBlockParent(BB: LLVMBasicBlockRef) -> LLVMValueRef;
     pub fn LLVMGetBasicBlockTerminator(BB: LLVMBasicBlockRef) -> LLVMValueRef;
     pub fn LLVMGetEntryBasicBlock(Fn: LLVMValueRef) -> LLVMBasicBlockRef;
+    pub fn LLVMGetFirstBasicBlock(Fn: LLVMValueRef) -> LLVMBasicBlockRef;
+    pub fn LLVMGetNextBasicBlock(BB: LLVMBasicBlockRef) -> LLVMBasicBlockRef;
+    pub fn LLVMDeleteBasicBlock(BB: LLVMBasicBlockRef);
+    pub fn LLVMGetNextInstruction(Inst: LLVMValueRef) -> LLVMValueRef;
+    pub fn LLVMInstructionEraseFromParent(Inst: LLVMValueRef);
+    pub fn LLVMReplaceAllUsesWith(OldVal: LLVMValueRef, NewVal: LLVMValueRef);
+    pub fn LLVMIsACallInst(Val: LLVMValueRef) -> LLVMValueRef;
+    pub fn LLVMGetCalledValue(Instr: LLVMValueRef) -> LLVMValueRef;
     pub fn LLVMGetFirstInstruction(BB: LLVMBasicBlockRef) -> LLVMValueRef;
     pub fn LLVMGetFirstFunction(M: LLVMModuleRef) -> LLVMValueRef;
     pub fn LLVMGetNextFunction(Fn: LLVMValueRef) -> LLVMValueRef;

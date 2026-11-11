@@ -231,6 +231,35 @@ impl<'ctx> Module<'ctx> {
         }
     }
 
+    /// Every function in the module.
+    pub fn functions(&self) -> Vec<Function<'ctx>> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut f = raw::LLVMGetFirstFunction(self.ptr);
+            while !f.is_null() {
+                out.push(Function(Value::new(f)));
+                f = raw::LLVMGetNextFunction(f);
+            }
+        }
+        out
+    }
+
+    /// Give every function DECLARATION (no body) external linkage. A body
+    /// that was never emitted (a generic method withdrawn for its type
+    /// arguments) can leave an internal declaration behind, which LLVM's
+    /// verifier rejects; as an external declaration it is valid, and unused.
+    pub fn externalize_declarations(&self) {
+        unsafe {
+            let mut f = raw::LLVMGetFirstFunction(self.ptr);
+            while !f.is_null() {
+                if raw::LLVMIsDeclaration(f) != 0 {
+                    raw::LLVMSetLinkage(f, raw::LLVMLinkage::External);
+                }
+                f = raw::LLVMGetNextFunction(f);
+            }
+        }
+    }
+
     /// Render the module's IR to a `String` (mirrors `LLVMPrintModuleToString`).
     pub fn print_to_string(&self) -> String {
         unsafe {
@@ -888,6 +917,18 @@ impl<'ctx> Value<'ctx> {
         }
     }
 
+    /// Mark call-site argument `arg_idx` with the integer-extension attribute
+    /// `ext` (`zeroext` / `signext`).
+    pub fn add_call_site_ext(self, arg_idx: u32, ext: &str) {
+        let idx = attr_param_index(arg_idx);
+        unsafe {
+            let ctx = value_context(self.0);
+            let kind = raw::LLVMGetEnumAttributeKindForName(ext.as_ptr() as *const _, ext.len());
+            let attr = raw::LLVMCreateEnumAttribute(ctx, kind, 0);
+            raw::LLVMAddCallSiteAttribute(self.0, idx, attr);
+        }
+    }
+
     /// Mark call-site argument `arg_idx` of a call instruction as
     /// `sret(pointee)` (+ noalias, align). Required when an INDIRECT call
     /// returns a big aggregate: AAPCS64 wants the result pointer in x8, and
@@ -949,6 +990,97 @@ impl<'ctx> Value<'ctx> {
 pub struct Function<'ctx>(Value<'ctx>);
 
 impl<'ctx> Function<'ctx> {
+    /// The function's symbol name.
+    pub fn symbol_name(self) -> String {
+        unsafe {
+            let mut len: usize = 0;
+            let p = raw::LLVMGetValueName2(self.0.0, &mut len);
+            if p.is_null() {
+                return String::new();
+            }
+            let bytes = std::slice::from_raw_parts(p as *const u8, len);
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    }
+
+    /// Does the function have a body (at least one basic block)?
+    pub fn has_body(self) -> bool {
+        unsafe { !raw::LLVMGetFirstBasicBlock(self.0.0).is_null() }
+    }
+
+    /// Names of the functions this body calls directly.
+    pub fn direct_callees(self) -> Vec<String> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut bb = raw::LLVMGetFirstBasicBlock(self.0.0);
+            while !bb.is_null() {
+                let mut i = raw::LLVMGetFirstInstruction(bb);
+                while !i.is_null() {
+                    if !raw::LLVMIsACallInst(i).is_null() {
+                        let callee = raw::LLVMGetCalledValue(i);
+                        if !callee.is_null() {
+                            let mut len: usize = 0;
+                            let p = raw::LLVMGetValueName2(callee, &mut len);
+                            if !p.is_null() && len > 0 {
+                                let bytes = std::slice::from_raw_parts(p as *const u8, len);
+                                out.push(String::from_utf8_lossy(bytes).into_owned());
+                            }
+                        }
+                    }
+                    i = raw::LLVMGetNextInstruction(i);
+                }
+                bb = raw::LLVMGetNextBasicBlock(bb);
+            }
+        }
+        out
+    }
+
+    /// Replace the body with a single `unreachable` block (see `clear_body`).
+    pub fn make_unreachable(self, builder: &Builder<'ctx>) {
+        self.clear_body();
+        let bb = self.append_basic_block("withdrawn");
+        builder.position_at_end(bb);
+        builder.unreachable();
+    }
+
+    /// Delete every basic block, leaving a bare declaration (a body whose
+    /// lowering failed partway must not reach the backend half-built).
+    /// References between the blocks go first: every terminator (branch
+    /// targets, back-edges) is erased and every value's uses replaced with
+    /// `undef`, so no block is freed while another still points into it.
+    pub fn clear_body(self) {
+        unsafe {
+            let f = self.0.0;
+            let mut bb = raw::LLVMGetFirstBasicBlock(f);
+            while !bb.is_null() {
+                let t = raw::LLVMGetBasicBlockTerminator(bb);
+                if !t.is_null() {
+                    raw::LLVMInstructionEraseFromParent(t);
+                }
+                bb = raw::LLVMGetNextBasicBlock(bb);
+            }
+            bb = raw::LLVMGetFirstBasicBlock(f);
+            while !bb.is_null() {
+                let mut i = raw::LLVMGetFirstInstruction(bb);
+                while !i.is_null() {
+                    let ty = raw::LLVMTypeOf(i);
+                    if !matches!(raw::LLVMGetTypeKind(ty), raw::LLVMTypeKind::Void) {
+                        raw::LLVMReplaceAllUsesWith(i, raw::LLVMGetUndef(ty));
+                    }
+                    i = raw::LLVMGetNextInstruction(i);
+                }
+                bb = raw::LLVMGetNextBasicBlock(bb);
+            }
+            loop {
+                let bb = raw::LLVMGetFirstBasicBlock(f);
+                if bb.is_null() {
+                    break;
+                }
+                raw::LLVMDeleteBasicBlock(bb);
+            }
+        }
+    }
+
     pub fn as_value(self) -> Value<'ctx> {
         self.0
     }
@@ -1027,14 +1159,15 @@ impl<'ctx> Function<'ctx> {
         }
     }
 
-    /// `zeroext` on parameter `arg_idx` (C ABI for i1 bool).
-    pub fn add_param_attr_zeroext(self, arg_idx: u32) {
-        self.add_enum_attr(attr_param_index(arg_idx), "zeroext", 0);
+    /// The integer-extension attribute `ext` (`zeroext` / `signext`) on
+    /// parameter `arg_idx`.
+    pub fn add_param_attr_ext(self, arg_idx: u32, ext: &str) {
+        self.add_enum_attr(attr_param_index(arg_idx), ext, 0);
     }
 
-    /// `zeroext` on the return slot.
-    pub fn add_ret_attr_zeroext(self) {
-        self.add_enum_attr(ATTR_RETURN_INDEX, "zeroext", 0);
+    /// The integer-extension attribute `ext` on the return slot.
+    pub fn add_ret_attr_ext(self, ext: &str) {
+        self.add_enum_attr(ATTR_RETURN_INDEX, ext, 0);
     }
 
     pub fn set_no_return(self) {
@@ -1057,6 +1190,48 @@ impl<'ctx> Function<'ctx> {
         }
         self.add_enum_attr(idx, "noalias", 0);
         self.add_enum_attr(idx, "align", align as u64);
+    }
+
+    /// Mark parameter `arg_idx` as `byval(<pointee>) align <a>`: x86-64 SysV
+    /// passes memory-class aggregates as a stack copy, and the declaration
+    /// must say so as well as the call site.
+    pub fn add_param_attr_byval(self, arg_idx: u32, pointee: Type<'ctx>, align: u32) {
+        let idx = attr_param_index(arg_idx);
+        unsafe {
+            let ctx = value_context(self.0.0);
+            let kind = raw::LLVMGetEnumAttributeKindForName("byval".as_ptr() as *const _, 5);
+            let byval = raw::LLVMCreateTypeAttribute(ctx, kind, pointee.as_ptr());
+            raw::LLVMAddAttributeAtIndex(self.0.0, idx, byval);
+        }
+        self.add_enum_attr(idx, "align", align as u64);
+    }
+
+    /// Tag the function with a key-only string attribute, a marker later
+    /// codegen can test with [`Function::has_marker_attr`].
+    pub fn add_marker_attr(self, key: &str) {
+        unsafe {
+            let ctx = value_context(self.0.0);
+            let attr = raw::LLVMCreateStringAttribute(
+                ctx,
+                key.as_ptr() as *const _,
+                key.len() as u32,
+                "".as_ptr() as *const _,
+                0,
+            );
+            raw::LLVMAddAttributeAtIndex(self.0.0, ATTR_FUNCTION_INDEX, attr);
+        }
+    }
+
+    pub fn has_marker_attr(self, key: &str) -> bool {
+        unsafe {
+            !raw::LLVMGetStringAttributeAtIndex(
+                self.0.0,
+                ATTR_FUNCTION_INDEX,
+                key.as_ptr() as *const _,
+                key.len() as u32,
+            )
+            .is_null()
+        }
     }
 
     /// True if parameter 0 carries `sret`.
