@@ -207,6 +207,22 @@ code, pre, kbd { font-family: var(--mono); }
     color: var(--text-muted);
 }
 
+/* Page opener on About: mascot beside the title and lead. */
+.intro {
+    display: flex;
+    align-items: center;
+    gap: 2.5rem;
+    margin: 0 0 2.5rem;
+}
+.intro-mascot {
+    flex: none;
+    width: 13rem;
+    height: auto;
+}
+.intro-text { flex: 1; min-width: 0; }
+.intro-text h1 { margin-bottom: 1.25rem; }
+.intro-text p:last-child { margin-bottom: 0; }
+
 /* Pills beside headings: <span class="badge alpha">Alpha</span> */
 .badge {
     display: inline-block;
@@ -384,6 +400,9 @@ code, pre, kbd { font-family: var(--mono); }
     .content h1 { font-size: 2.1rem; }
     .content h2 { font-size: 1.5rem; margin-top: 3rem; scroll-margin-top: 5.5rem; }
     .content h3 { scroll-margin-top: 5.5rem; }
+
+    .intro { flex-direction: column; align-items: flex-start; gap: 1.25rem; }
+    .intro-mascot { width: 9rem; }
 
     .card { flex-wrap: wrap; border-radius: 1.25rem; }
     .card img { width: 3.25rem; height: 3.25rem; }

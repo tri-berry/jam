@@ -3,12 +3,19 @@ title: About
 permalink: /
 ---
 
+<div class="intro">
+<img class="intro-mascot" src="{{ '/assets/images/mascot-01.png' | relative_url }}" alt="The Jam mascot, a jam jar in sunglasses making a peace sign" width="2814" height="2813">
+<div class="intro-text" markdown="1">
+
 # About Jam
 
 Jam is a statically typed systems language with mutable value semantics, generics
 over types, tagged unions, and an LLVM backend. It aims for the memory safety of Rust
 without lifetime annotations, and for code that reads plainly at the call site.
 {: .lead}
+
+</div>
+</div>
 
 ```jam
 const std = import("std");
