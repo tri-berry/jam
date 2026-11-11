@@ -509,6 +509,7 @@ code, pre, kbd { font-family: var(--mono); }
         border-bottom: 1px solid var(--border-soft);
     }
     .topbar-logo img { width: 2.75rem; height: 2.75rem; }
+    .topbar-actions { display: flex; align-items: center; gap: 0.25rem; }
     .topbar-menu {
         padding: 0.5rem;
         margin-right: -0.5rem;

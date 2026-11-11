@@ -6,9 +6,14 @@
 <body>
     <header class="topbar">
         <a href="{{ '/' | relative_url }}" class="topbar-logo"><img src="{{ '/assets/images/logo.png' | relative_url }}" alt="Jam"></a>
-        <button type="button" class="topbar-menu" data-nav-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Open menu">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-        </button>
+        <div class="topbar-actions">
+            <button type="button" class="topbar-menu" data-search-open aria-label="Search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            </button>
+            <button type="button" class="topbar-menu" data-nav-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Open menu">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            </button>
+        </div>
     </header>
 
     <div class="shell">
