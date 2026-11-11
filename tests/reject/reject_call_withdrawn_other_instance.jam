@@ -1,0 +1,11 @@
+// A method of ANOTHER instance that calls a withdrawn method (it was lowered
+// before the withdrawal) can't be called either (it compiled and trapped).
+// expect-error: `main` can't be compiled: it calls `mod_withdraw_order.G__i64.a`, which is not available for this instantiation
+
+const m = import("mod_withdraw_order");
+const W = struct { g: m.G(i64) };
+
+fn main() {
+    var w = W { g: m.G(i64) { v: 3 } };
+    var r: i64 = w.g.a();
+}

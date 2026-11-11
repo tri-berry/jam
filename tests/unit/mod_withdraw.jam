@@ -1,0 +1,21 @@
+// Helper for test_withdrawn_methods_link.jam: a generic whose methods call an
+// imported-style payload-enum fn. Instantiated through a struct field, the
+// instance is lowered while type bodies are still being filled, before that
+// fn is declared, so `go` (and `go2`, which calls it) are withdrawn.
+pub const Bx = enum { E, V(i64, i64, i64) };
+pub fn mk(i: i64) Bx { return Bx.V(i, i + 1, i + 2); }
+pub fn val(b: Bx) i64 {
+    match (b) { Bx.V(a, c, d) { return a + c + d; } _ { return -1; } }
+    return 0;
+}
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn go(self: Self) i64 {
+            var i: i64 = 0;
+            while (i < 2) { i = i + 1; }
+            return val(mk(self.v)) + i;
+        }
+        pub fn go2(self: Self) i64 { return self.go() + 1; }
+    };
+}

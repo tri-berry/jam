@@ -1,0 +1,11 @@
+// Calling a method that calls a withdrawn sibling is a compile error (it
+// used to trap at run time).
+// expect-error: method `mod_withdraw.G__i64.go2` is not available for this instantiation
+
+const m = import("mod_withdraw");
+const W = struct { g: m.G(i64) };
+
+fn main() {
+    var w = W { g: m.G(i64) { v: 3 } };
+    var r: i64 = w.g.go2();
+}

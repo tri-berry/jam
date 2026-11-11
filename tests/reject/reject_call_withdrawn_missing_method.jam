@@ -1,0 +1,11 @@
+// A call reaching a withdrawn method through another instance is a compile
+// error, whatever made the method unavailable (here a method the type
+// argument lacks).
+// expect-error: `main` can't be compiled: it calls `mod_withdraw_missing.G__i64.a`
+
+const m = import("mod_withdraw_missing");
+
+fn main() {
+    var g = m.G(i64) { v: 3 };
+    var r: i64 = g.a();
+}

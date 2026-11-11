@@ -1,0 +1,22 @@
+// Helper for reject_call_withdrawn_other_instance.jam: `G(T).a` is declared
+// BEFORE `go`, so lowering `a` instantiates `H(T)` and lowers `H.x` (a call
+// to `go`) before `go` is withdrawn. Only the module-wide check then sees it.
+pub const Bx = enum { E, V(i64, i64, i64) };
+pub fn mk(i: i64) Bx { return Bx.V(i, i + 1, i + 2); }
+pub fn val(b: Bx) i64 {
+    match (b) { Bx.V(a, c, d) { return a + c + d; } _ { return -1; } }
+    return 0;
+}
+pub fn H(T: type) type {
+    return struct {
+        v: T,
+        pub fn x(self: Self) i64 { var g = G(T) { v: self.v }; return g.go(); }
+    };
+}
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn a(self: Self) i64 { var h = H(T) { v: self.v }; return h.x(); }
+        pub fn go(self: Self) i64 { return val(mk(self.v)); }
+    };
+}

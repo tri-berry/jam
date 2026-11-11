@@ -1,0 +1,16 @@
+// Helper for reject_call_withdrawn_missing_method.jam: `G(T).go` calls a
+// method `i64` doesn't have, so `G(i64).go` is withdrawn. `a` is declared
+// first, so `H(T).x` (a call to `go`) is lowered before the withdrawal.
+pub fn H(T: type) type {
+    return struct {
+        v: T,
+        pub fn x(self: Self) i64 { var g = G(T) { v: self.v }; return g.go(); }
+    };
+}
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn a(self: Self) i64 { var h = H(T) { v: self.v }; return h.x(); }
+        pub fn go(self: Self) i64 { return self.v.missing(); }
+    };
+}

@@ -1,0 +1,12 @@
+// An instance whose methods can't be compiled here (see mod_withdraw.jam)
+// still builds and runs when they aren't called (it used to crash LLVM, then
+// fail to link through a sibling method).
+const m = import("mod_withdraw");
+
+const W = struct { g: m.G(i64) };
+
+tfn uncalledWithdrawnMethodsDontBreakTheBuild() {
+    var w = W { g: m.G(i64) { v: 3 } };
+    assert(w.g.v, 3);
+    assert(m.val(m.mk(3)), 12);
+}
