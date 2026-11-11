@@ -829,6 +829,162 @@ fn dump_jir_function(o: &mut Vec<u8>, tp: &TypePool, sp: &StringPool, f: &JirFun
     }
 }
 
+/// Every declaration of one C symbol (externs, and exports, which define it)
+/// must agree on how its values cross the boundary once each module's types
+/// are qualified: two modules each declaring `extern fn c_q(q: Q)` with their
+/// own, differently laid out `Q` would share one prototype. Run `early`,
+/// before codegen, so a mismatch is reported before calls are lowered against
+/// the wrong prototype, skipping signatures with generic instances not yet
+/// created; then late, after codegen, for everything.
+fn check_c_symbol_agreement(
+    cg: &CodegenContext,
+    all_modules: &[&ModuleAST],
+    module_ids: &[String],
+    early: bool,
+) {
+    // Does `t` name only types that exist (no generic instance it would
+    // have to create)?
+    fn instance_exists(cg: &CodegenContext, t: TypeIdx) -> bool {
+        instance_exists_at(cg, t, 0)
+    }
+    // `depth` bounds the alias chase: swapped import handles
+    // (`const a = import("b"); const b = import("a")`) make `a.S` and
+    // `b.S` aliases of each other.
+    fn instance_exists_at(cg: &CodegenContext, t: TypeIdx, depth: u32) -> bool {
+        if t.is_none() || depth > 64 {
+            return true;
+        }
+        let k = cg.type_pool.get(t);
+        match k.kind {
+            TypeKind::GenericCall => !cg.lookup_generic_resolution(t).is_none(),
+            TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Slice | TypeKind::Array => {
+                instance_exists_at(cg, TypeIdx::new(k.a), depth + 1)
+            }
+            // A type alias (`const P = H(i64)`) stands for its target.
+            TypeKind::Named => {
+                let name = String::from_utf8_lossy(
+                    &cg.string_pool.get(jam_core::index::StringIdx::new(k.a)),
+                )
+                .into_owned();
+                let alias = cg.lookup_type_alias(&name);
+                alias.is_none() || alias == t || instance_exists_at(cg, alias, depth + 1)
+            }
+            _ => true,
+        }
+    }
+        // How a value crosses the boundary: a scalar by its type, an
+        // aggregate by size, alignment and C ABI class (two modules' own
+        // same-layout `Q`s agree; differently laid out ones don't).
+        #[derive(PartialEq)]
+        enum Crossing {
+            Scalar(TypeIdx),
+            // An integer (also a unit enum's tag) by width and signedness.
+            Int(u32, bool),
+            // A slice is `{ptr, len}`, whatever its element type.
+            Slice,
+            // Any pointer (also a `mut` param, or a slice's data) is one
+            // address word, whatever it points at.
+            Pointer,
+            Aggregate(u64, u64, Option<jam_sema::abi::CAbiClass>),
+        }
+        type Sig = (Vec<Crossing>, Crossing, bool);
+        let mut seen: std::collections::HashMap<String, (Sig, String)> =
+            std::collections::HashMap::new();
+        for (i, m) in all_modules.iter().enumerate() {
+            let id = module_ids[i].clone();
+            cg.push_body_module(id.clone());
+            // Externs and exports alike: an export defines the symbol a
+            // same-named extern elsewhere declares.
+            for func in m.functions.iter().filter(|f| f.is_extern || f.is_export) {
+                // Early: a signature naming a generic instance that doesn't
+                // exist yet waits for the late run (classifying it here
+                // would instantiate it before the functions its methods
+                // call are declared).
+                if early
+                    && func
+                        .args
+                        .iter()
+                        .map(|p| p.ty)
+                        .chain(std::iter::once(func.return_type))
+                        .any(|t| !instance_exists(cg, cg.requalify_type(t, &id)))
+                {
+                    continue;
+                }
+                let crossing = |t: TypeIdx| -> Crossing {
+                    let t = cg.requalify_type(t, &id);
+                    if !t.is_none()
+                        && matches!(
+                            cg.type_pool.get(t).kind,
+                            TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Fn
+                        )
+                    {
+                        return Crossing::Pointer;
+                    }
+                    if !t.is_none() {
+                        let k = cg.type_pool.get(t);
+                        if k.kind == TypeKind::Int {
+                            return Crossing::Int(k.a, k.b != 0);
+                        }
+                        if k.kind == TypeKind::Slice {
+                            return Crossing::Slice;
+                        }
+                        if cg.enum_name_of(t).is_some() && !jam_sema::abi::is_by_ref(t, cg) {
+                            return Crossing::Int(8, false);
+                        }
+                    }
+                    if t.is_none() || !jam_sema::abi::is_by_ref(t, cg) {
+                        return Crossing::Scalar(t);
+                    }
+                    Crossing::Aggregate(
+                        cg.type_size(t).unwrap_or(0),
+                        cg.type_align(t).unwrap_or(0),
+                        jam_sema::abi::classify_c_abi(t, cg).ok(),
+                    )
+                };
+                let sig = (
+                    func.args
+                        .iter()
+                        .map(|p| {
+                            if p.mode == jam_core::param_mode::ParamMode::Mut {
+                                Crossing::Pointer
+                            } else {
+                                crossing(p.ty)
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                    crossing(func.return_type),
+                    func.is_var_args,
+                );
+                let shown = |m: &str| {
+                    if m.is_empty() {
+                        "the entry module".to_string()
+                    } else {
+                        format!("module `{m}`")
+                    }
+                };
+                match seen.get(&func.name) {
+                    Some((prev, prev_mod)) if *prev != sig => {
+                        cg.push_error(
+                            jam_core::diag::SrcLoc::none(),
+                            format!(
+                                "extern `{}` is declared twice with different signatures \
+                                 ({} and {}); every declaration of a C symbol must agree",
+                                func.name,
+                                shown(prev_mod),
+                                shown(&id)
+                            ),
+                        );
+                    }
+                    Some(_) => {}
+                    None => {
+                        seen.insert(func.name.clone(), (sig, id.clone()));
+                    }
+                }
+            }
+            cg.pop_body_module();
+        }
+}
+
 /// Qualify a type/method name with its owning module: bare for the entry
 /// module, `module.name` otherwise.
 fn qualify_type_name(module_path: &str, name: &str) -> String {
@@ -1353,12 +1509,20 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             func.name.clone()
         }
     };
-    for m in &all_modules {
+    for (i, m) in all_modules.iter().enumerate() {
         for func in &m.functions {
             cg.register_function_ast(reg_key(func), func.clone());
             if !func.module_path.is_empty() {
                 cg.register_function_ast(
                     format!("{}.{}", func.module_path, func.name),
+                    func.clone(),
+                );
+            } else if (func.is_extern || func.is_export) && i > 0 {
+                // An extern keeps its bare C symbol (empty module_path), but
+                // its declaring module can still reach it by its own key,
+                // whichever module last claimed the bare key.
+                cg.register_function_ast(
+                    format!("{}.{}", loaded_sorted[i - 1].0, func.name),
                     func.clone(),
                 );
             }
@@ -1379,6 +1543,58 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
         v.push(&module);
         v
     };
+    // A module's destructured TYPES (`const { A } = import("src")`) resolve to
+    // the source module's type within that module, registered BEFORE the
+    // types are analyzed: a struct field of the module typed `A` is qualified
+    // during analysis. A type the module declares itself wins. (Chains
+    // through a re-export handle are resolved again, later, once handles
+    // exist.)
+    {
+        let by_id: std::collections::HashMap<&str, &ModuleAST> =
+            loaded_sorted.iter().map(|p| (p.0.as_str(), &p.1)).collect();
+        for (i, m) in all_modules.iter().enumerate().skip(1) {
+            let id = loaded_sorted[i - 1].0.clone();
+            let own: std::collections::HashSet<&String> = m
+                .structs
+                .iter()
+                .map(|s| &s.name)
+                .chain(m.enums.iter().map(|e| &e.name))
+                .chain(m.unions.iter().map(|u| &u.name))
+                .collect();
+            for di in &m.destructuring_imports {
+                let mut candidate = resolver
+                    .import_identities
+                    .get(&(id.clone(), di.path.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| di.path.clone());
+                for seg in &di.chain {
+                    candidate = resolver
+                        .import_identities
+                        .get(&(candidate.clone(), seg.clone()))
+                        .cloned()
+                        .unwrap_or_else(|| format!("{candidate}/{seg}"));
+                }
+                let Some(src) = by_id.get(candidate.as_str()) else {
+                    continue;
+                };
+                for name in &di.names {
+                    if own.contains(name) {
+                        continue;
+                    }
+                    let declared = src.structs.iter().any(|s| &s.name == name)
+                        || src.enums.iter().any(|e| &e.name == name)
+                        || src.unions.iter().any(|u| &u.name == name);
+                    if declared {
+                        let q = format!("{candidate}.{name}");
+                        let sid = cg.string_pool.intern(q.as_bytes());
+                        let named = cg.type_pool.intern_named(sid);
+                        cg.register_requalify(&id, name, named);
+                        cg.register_destructured_type(&id, name, named);
+                    }
+                }
+            }
+        }
+    }
     register_and_analyze(&mut cg, &reg_modules);
     // Register each module's anonymous struct bodies (generic factories'
     // `return struct {...}`), keyed by module identity, so generic
@@ -1457,44 +1673,6 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
         }
     }
 
-    // Eager `comp const` validation: every comp-marked module const must fold
-    // against the const fixpoint in its OWN module's scope. A non-foldable init
-    // (`comp const X = 10 / 0;` — div-by-zero, runtime-dependent, or otherwise
-    // unsupported) is rejected HERE at the declaration; without this the use site
-    // re-lowers the unfoldable init and emits poison IR. Plain consts stay lazy.
-    // Only fires for jir/ir/build/test (the token/ast paths return earlier).
-    {
-        let mut diags = Diagnostics::new();
-        for m in &all_modules {
-            for c in &m.consts {
-                if !c.is_comp || !c.aliased_type.is_none() || c.init_expr.is_none() {
-                    continue;
-                }
-                cg.push_body_module(c.module_path.clone());
-                let v = cg.fold_comptime_expr(c.init_expr);
-                cg.pop_body_module();
-                if v.is_none() {
-                    let file = if c.module_path.is_empty() {
-                        path.to_string()
-                    } else {
-                        format!("{}.jam", c.module_path)
-                    };
-                    let line = cg.node_store.get_line(c.init_expr);
-                    diags.error(
-                        jam_core::diag::SrcLoc::new(&file, line),
-                        format!(
-                            "comp const `{}` must be compile-time evaluable — its initializer depends on a runtime value or an unsupported construct",
-                            c.name
-                        ),
-                    );
-                }
-            }
-        }
-        if diags.has_errors() {
-            eprint!("{}", diags.render_to_string());
-            return 1;
-        }
-    }
 
     // Destructuring-import type aliases: `const { Token } = import("m")` brings
     // the type into scope under its bare name; resolve it to `m.Token`. Build a
@@ -1518,12 +1696,24 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                 type_by_bare.insert(name.clone(), ty);
             }
         }
-        for m in &all_modules {
-            for di in &m.destructuring_imports {
-                for name in &di.names {
-                    if let Some(&ty) = type_by_bare.get(name) {
-                        cg.register_type_alias(name.clone(), ty);
-                    }
+        // Only the ENTRY's destructured names become global aliases (a
+        // module's are scoped to it via the requalify map, below, once its
+        // source module is resolved), and never over a type the entry
+        // declares itself.
+        let entry_types: std::collections::HashSet<&String> = module
+            .structs
+            .iter()
+            .map(|s| &s.name)
+            .chain(module.enums.iter().map(|e| &e.name))
+            .chain(module.unions.iter().map(|u| &u.name))
+            .collect();
+        for di in &module.destructuring_imports {
+            for name in &di.names {
+                if entry_types.contains(name) {
+                    continue;
+                }
+                if let Some(&ty) = type_by_bare.get(name) {
+                    cg.register_type_alias(name.clone(), ty);
                 }
             }
         }
@@ -1584,6 +1774,81 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                 }
                 if loaded_keys.contains(candidate.as_str()) {
                     cg.register_import_handle(id.clone(), imp.name.clone(), candidate);
+                }
+            }
+        }
+
+        let entry_type_names: std::collections::HashSet<String> = module
+            .structs
+            .iter()
+            .map(|s| s.name.clone())
+            .chain(module.enums.iter().map(|e| e.name.clone()))
+            .chain(module.unions.iter().map(|u| u.name.clone()))
+            .collect();
+        for f in module.functions.iter().filter(|f| !f.is_test) {
+            cg.register_entry_fn(f.name.clone());
+        }
+        // Destructuring-import bindings, after every handle is known: a
+        // `.chain` segment may be a re-export handle whose name differs from
+        // its import path (`pub const k = import("mod_k")`).
+        for (i, m) in all_modules.iter().enumerate() {
+            let id = if i == 0 {
+                String::new()
+            } else {
+                loaded_sorted[i - 1].0.clone()
+            };
+            for di in &m.destructuring_imports {
+                let mut candidate = resolver
+                    .import_identities
+                    .get(&(id.clone(), di.path.clone()))
+                    .cloned()
+                    .unwrap_or_else(|| di.path.clone());
+                for seg in &di.chain {
+                    candidate = cg
+                        .import_handle_of(&candidate, seg)
+                        .or_else(|| {
+                            resolver
+                                .import_identities
+                                .get(&(candidate.clone(), seg.clone()))
+                                .cloned()
+                        })
+                        .unwrap_or_else(|| format!("{candidate}/{seg}"));
+                }
+                if loaded_keys.contains(candidate.as_str()) {
+                    for name in &di.names {
+                        cg.register_destructured(id.clone(), name.clone(), candidate.clone());
+                        // A destructured TYPE names the module it was
+                        // destructured from (the earlier bare-name alias
+                        // picked whichever loaded module declares that name
+                        // last). The entry's is a global alias, unless the
+                        // entry declares that type itself; a module's is
+                        // scoped to that module through the requalify map.
+                        let q = format!("{candidate}.{name}");
+                        let sid = cg.string_pool.intern(q.as_bytes());
+                        let named = cg.type_pool.intern_named(sid);
+                        // By name only: resolving `named` would chase an
+                        // alias (`pub const P = H(i64)`) into instantiating
+                        // the generic before any fn is declared.
+                        let is_type = cg.is_struct_name_registered(&q)
+                            || cg.is_enum_name_registered(&q)
+                            || cg.is_union_name_registered(&q)
+                            || !cg.lookup_type_alias(&q).is_none();
+                        if is_type {
+                            if !id.is_empty() {
+                                // (Unless the module declares that type itself.)
+                                let own_q = format!("{id}.{name}");
+                                if !cg.is_struct_name_registered(&own_q)
+                                    && !cg.is_union_name_registered(&own_q)
+                                    && !cg.is_enum_name_registered(&own_q)
+                                {
+                                    cg.register_requalify(&id, name, named);
+                                    cg.register_destructured_type(&id, name, named);
+                                }
+                            } else if !entry_type_names.contains(name) {
+                                cg.register_type_alias(name.clone(), named);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1664,6 +1929,47 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
         }
     }
 
+    // Eager `comp const` validation: every comp-marked module const must fold
+    // against the const fixpoint in its OWN module's scope. A non-foldable init
+    // (`comp const X = 10 / 0;` — div-by-zero, runtime-dependent, or otherwise
+    // unsupported) is rejected HERE at the declaration; without this the use site
+    // re-lowers the unfoldable init and emits poison IR. Plain consts stay lazy.
+    // Only fires for jir/ir/build/test (the token/ast paths return earlier).
+    // Runs after the destructuring-import bindings exist, so a comp const may
+    // use a destructured one.
+    {
+        let mut diags = Diagnostics::new();
+        for m in &all_modules {
+            for c in &m.consts {
+                if !c.is_comp || !c.aliased_type.is_none() || c.init_expr.is_none() {
+                    continue;
+                }
+                cg.push_body_module(c.module_path.clone());
+                let v = cg.fold_comptime_expr(c.init_expr);
+                cg.pop_body_module();
+                if v.is_none() {
+                    let file = if c.module_path.is_empty() {
+                        path.to_string()
+                    } else {
+                        format!("{}.jam", c.module_path)
+                    };
+                    let line = cg.node_store.get_line(c.init_expr);
+                    diags.error(
+                        jam_core::diag::SrcLoc::new(&file, line),
+                        format!(
+                            "comp const `{}` must be compile-time evaluable; its initializer depends on a runtime value or an unsupported construct",
+                            c.name
+                        ),
+                    );
+                }
+            }
+        }
+        if diags.has_errors() {
+            eprint!("{}", diags.render_to_string());
+            return 1;
+        }
+    }
+
     // In-place FunctionAST signature requalification. Decl-type references
     // requalify lazily at use, but a cross-module call site lowers the callee's
     // param/return types against ITS OWN body module (""), where a bare imported
@@ -1701,13 +2007,30 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
         for pair in &loaded_sorted {
             let m = &pair.1;
             for func in &m.functions {
-                let (nf, changed) = requalify_fn(&cg, func, &func.module_path);
+                // An extern keeps an empty module_path (its C symbol is
+                // bare), but its types are spelled in this module.
+                let mpath = if func.module_path.is_empty() {
+                    pair.0.as_str()
+                } else {
+                    func.module_path.as_str()
+                };
+                let (nf, changed) = requalify_fn(&cg, func, mpath);
                 if !changed {
                     continue;
                 }
-                cg.register_function_ast(reg_key(&nf), nf.clone());
+                // The same declaration, re-registered with qualified types:
+                // a replacement, not a second declaration to clash with. An
+                // extern's bare key may belong to another module's (or the
+                // entry's) declaration of the same C symbol, so it only
+                // updates its module key, which this module's bodies and
+                // handle calls look up first.
+                if (nf.is_extern || nf.is_export) && nf.module_path.is_empty() {
+                    cg.replace_function_ast(format!("{mpath}.{}", nf.name), nf);
+                    continue;
+                }
+                cg.replace_function_ast(reg_key(&nf), nf.clone());
                 if !nf.module_path.is_empty() {
-                    cg.register_function_ast(format!("{}.{}", nf.module_path, nf.name), nf);
+                    cg.replace_function_ast(format!("{}.{}", nf.module_path, nf.name), nf);
                 }
             }
             for s in &m.structs {
@@ -1810,7 +2133,12 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             let drops = build_drop_registry(m, &cg.type_pool, &cg.string_pool);
             for (type_name, drop_fn) in &drops {
                 let mangled = mangled_function_name(drop_fn, &cg.type_pool, &cg.string_pool);
-                cg.register_drop_fn(type_name.clone(), mangled.clone());
+                // The bare name is the entry module's: an imported module's
+                // drop registers only under its qualified name below (a bare
+                // registration took over the entry's drop-less `A`).
+                if drop_fn.module_path.is_empty() {
+                    cg.register_drop_fn(type_name.clone(), mangled.clone());
+                }
                 // Imported drop-bearing types are referenced by their QUALIFIED
                 // name (`mod.XThing`); register the drop there too so the field/
                 // scope drop walk resolves it.
@@ -1825,8 +2153,18 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             // methods.
             let mut clones = CloneRegistry::new();
             add_clone_candidates(&mut clones, m, &cg.type_pool, &cg.string_pool);
+            // Like drops: the entry's clones under the bare type name, an
+            // imported module's under `module.Type` (the name its types are
+            // looked up by).
             for (type_name, clone_fn) in &clones {
-                cg.register_clone_fn(type_name.clone(), (*clone_fn).clone());
+                if clone_fn.module_path.is_empty() {
+                    cg.register_clone_fn(type_name.clone(), (*clone_fn).clone());
+                } else {
+                    cg.register_clone_fn(
+                        format!("{}.{}", clone_fn.module_path, type_name),
+                        (*clone_fn).clone(),
+                    );
+                }
             }
         }
     };
@@ -1944,7 +2282,12 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                 && let Ok(mut jfn) = astgen_function(func, &mut cg)
             {
                 jfn.name = mangled_function_name(func, &cg.type_pool, &cg.string_pool);
+                // Classify the signature in its own module's scope: a by-value
+                // struct param/return (C-ABI lowering) must resolve to the
+                // declaring module's type, not a same-named entry-module one.
+                cg.push_body_module(pair.0.clone());
                 let _ = jir_declare_prototype(&jfn, &cg);
+                cg.pop_body_module();
             }
         }
     }
@@ -1978,6 +2321,84 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
     if !matches!(mode, EmitMode::Jir) {
         fill_type_bodies(&mut cg, &reg_modules);
         register_drop_clone(&mut cg, &all_modules);
+        // Pass B declared the imported prototypes before the type bodies
+        // existed; complete any whose `sret` attribute needed one (a payload
+        // enum return). Already-declared fns are only patched, not renamed.
+        for pair in &loaded_libcxx {
+            cg.push_body_module(pair.0.clone());
+            for func in &pair.1.functions {
+                if func.is_generic() {
+                    continue;
+                }
+                let mut jfn = astgen_metadata(func, &cg);
+                jfn.name = mangled_function_name(func, &cg.type_pool, &cg.string_pool);
+                // An extern is redeclared only if Pass A/B couldn't declare
+                // it at all (a by-value type that had no body yet): a second
+                // declaration of one that exists would be renamed `.1`.
+                if func.is_extern && cg.module().get_function(&jfn.name).is_some() {
+                    continue;
+                }
+                let _ = jir_declare_prototype(&jfn, &cg);
+            }
+            cg.pop_body_module();
+        }
+        // One symbol, one definition: two exports named `jam_x` (or the
+        // entry's plain `fn helper`, whose symbol is bare too, and a module's
+        // `export fn helper`) used to be merged into one LLVM function, every
+        // caller silently getting the first body.
+        {
+            let mut defined: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (i, m) in all_modules.iter().enumerate() {
+                let id = if i == 0 {
+                    String::new()
+                } else {
+                    loaded_sorted[i - 1].0.clone()
+                };
+                let methods = m.structs.iter().flat_map(|st| st.methods.iter());
+                for func in m.functions.iter().chain(methods) {
+                    // (A `tfn` is lowered only from the entry, in test mode,
+                    // and its `__test_` symbol has no module path: skipped.)
+                    if func.is_extern || func.is_generic() || func.is_comp_time_fn || func.is_test {
+                        continue;
+                    }
+                    let symbol = mangled_function_name(func, &cg.type_pool, &cg.string_pool);
+                    let shown = |m: &str| {
+                        if m.is_empty() {
+                            "the entry module".to_string()
+                        } else {
+                            format!("module `{m}`")
+                        }
+                    };
+                    match defined.get(&symbol) {
+                        Some(prev) => {
+                            // Bare symbols: exports and the entry's functions.
+                            let hint = if symbol.contains('.') {
+                                ""
+                            } else {
+                                "; exports and the entry module's functions share one \
+                                 global namespace"
+                            };
+                            let msg = format!(
+                                "symbol `{symbol}` is defined twice ({} and {}){hint}",
+                                shown(prev),
+                                shown(&id)
+                            );
+                            cg.push_error(jam_core::diag::SrcLoc::none(), msg);
+                        }
+                        None => {
+                            defined.insert(symbol, id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // Extern/export agreement, before codegen (see
+        // `check_c_symbol_agreement`; the rest runs after codegen).
+        let module_ids: Vec<String> = std::iter::once(String::new())
+            .chain(loaded_sorted.iter().map(|p| p.0.clone()))
+            .collect();
+        check_c_symbol_agreement(&cg, &all_modules, &module_ids, true);
         // Same global-collector flush as the JIR path: a type cycle must stop
         // the compile before codegen recurses into the cyclic layout.
         if cg.has_errors() {
@@ -2050,10 +2471,20 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                     if func.is_generic() || func.is_extern {
                         continue;
                     }
+                    let first = jir.len();
                     if is_jir {
                         lower(cg, func, jir, errs);
                     } else {
                         lower_nodecl(cg, func, jir, errs);
+                    }
+                    // An export keeps its bare C symbol (empty module_path),
+                    // but its body, and its C wrapper, belong to this module:
+                    // they lowered in the entry's scope, where the module's
+                    // own types don't resolve (or resolve to the entry's).
+                    if func.module_path.is_empty() {
+                        for j in &mut jir[first..] {
+                            j.module_path = key.clone();
+                        }
                     }
                 }
                 for s in &m.structs {
@@ -2189,13 +2620,15 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
     // `file:line: error: message`.
     if !matches!(mode, EmitMode::Jir) {
         let mut diags = Diagnostics::new();
-        let mut run_analysis_in = |cg: &CodegenContext, f: &FunctionAST, file: &str| {
+        let mut run_analysis_in = |cg: &CodegenContext, f: &FunctionAST, file: &str, module: &str| {
             if f.is_extern {
                 return;
             }
             // Resolve body-level type references against the function's own
-            // module while analysis runs.
-            cg.push_body_module(f.module_path.clone());
+            // module while analysis runs (an export's module_path is empty:
+            // its declaring module's).
+            let m = if f.module_path.is_empty() { module } else { &f.module_path };
+            cg.push_body_module(m.to_string());
             let found = jam_sema::init_analysis::analyze(f, cg);
             cg.pop_body_module();
             for d in found {
@@ -2215,14 +2648,14 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             if func.is_generic() {
                 continue;
             }
-            run_analysis_in(&cg, func, path);
+            run_analysis_in(&cg, func, path, "");
         }
         for s in &module.structs {
             for m in &s.methods {
                 if m.is_generic() {
                     continue;
                 }
-                run_analysis_in(&cg, m, path);
+                run_analysis_in(&cg, m, path, "");
             }
         }
         // Imported modules: diagnostics attributed to the DEFINING file
@@ -2234,14 +2667,14 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                 if func.is_generic() {
                     continue;
                 }
-                run_analysis_in(&cg, func, &imported_file);
+                run_analysis_in(&cg, func, &imported_file, &pair.0);
             }
             for s in &pair.1.structs {
                 for m in &s.methods {
                     if m.is_generic() {
                         continue;
                     }
-                    run_analysis_in(&cg, m, &imported_file);
+                    run_analysis_in(&cg, m, &imported_file, &pair.0);
                 }
             }
         }
@@ -2281,6 +2714,71 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             }
             synthesize_test_main(&cg, &test_entries);
         }
+        // Then the extern/export agreement check for what the early run
+        // deferred (see `check_c_symbol_agreement`), now every instance exists.
+        let late_ids: Vec<String> = std::iter::once(String::new())
+            .chain(loaded_sorted.iter().map(|p| p.0.clone()))
+            .collect();
+        check_c_symbol_agreement(&cg, &all_modules, &late_ids, false);
+
+        // A withdrawn generic method has no working body. Anything still
+        // calling it (a method of ANOTHER instance lowered before the
+        // withdrawal, or plain code) would trap or fail to link: an
+        // instantiated method is withdrawn in turn; anything else is an error.
+        {
+            let mut withdrawn = cg.withdrawn_method_names();
+
+            // Functions already reported: each is reported once, and its own
+            // callers aren't (the error is at the first plain function).
+            let mut reported: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // (Nothing withdrawn: nothing to scan.)
+            while !withdrawn.is_empty() {
+                let mut changed = false;
+                for f in cg.module().functions() {
+                    if !f.has_body() {
+                        continue;
+                    }
+                    let name = f.symbol_name();
+                    if withdrawn.contains(&name) || reported.contains(&name) {
+                        continue;
+                    }
+                    let Some(callee) = f.direct_callees().into_iter().find(|c| withdrawn.contains(c))
+                    else {
+                        continue;
+                    };
+                    // Carry the callee's own reason, so the root cause shows.
+                    let callee_why = cg.get_withdrawn_method(&callee).unwrap_or_default();
+                    let why = format!(
+                        "it calls `{callee}`, which is not available for this instantiation ({callee_why})"
+                    );
+                    if cg.is_instance_method(&name) {
+                        f.make_unreachable(cg.builder());
+                        cg.record_withdrawn_method(name.clone(), why);
+                        withdrawn.insert(name);
+                        changed = true;
+                    } else {
+                        // An export's Jam-ABI body is the export itself to the user.
+                        // (A test's symbol is `__test_<name>`.)
+                        let shown = name.strip_suffix("$jam.body").unwrap_or(&name);
+                        let shown = shown.strip_prefix("__test_").unwrap_or(shown);
+                        cg.push_error(
+                            jam_core::diag::SrcLoc::none(),
+                            format!("`{shown}` can't be compiled: {why}"),
+                        );
+                        reported.insert(name);
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            if cg.has_errors() {
+                progress.error();
+                eprint!("{}", cg.diagnostics().render_to_string());
+                return 1;
+            }
+        }
+        cg.module().externalize_declarations();
         return match mode {
             EmitMode::Ir { .. } => {
                 // Clear the indicator before the IR hits stdout.
