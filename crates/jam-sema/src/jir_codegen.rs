@@ -17,13 +17,14 @@ use std::collections::HashMap;
 use jam_core::index::{StringIdx, TypeIdx};
 use jam_core::param_mode::ParamMode;
 use jam_llvm::{
-    BasicBlock, CallConv, Function, IntPredicate, Linkage, RealPredicate, Value, append_to_used,
+    BasicBlock, CallConv, Function, IntPredicate, Linkage, RealPredicate, Type, Value,
+    append_to_used,
 };
 use jam_syntax::ast_flat::{TypeKind, builtin};
 
 use crate::abi::{
-    CAbiClass, CWord, ParamAbi, ParamAbiKind, ReturnAbi, ReturnAbiKind, classify_c_abi,
-    classify_param, classify_return, is_by_ref,
+    CAbiClass, CParam, CSig, CWord, ParamAbi, ParamAbiKind, ReturnAbi, ReturnAbiKind,
+    c_abi_float_leaves, classify_c_abi, classify_param, classify_return, is_by_ref, sysv_demote,
 };
 use crate::codegen_context::CodegenContext;
 use crate::jir::{JirBlockRef, JirFunction, JirInst, JirRef, JirTag, NO_JIR_REF};
@@ -72,15 +73,770 @@ fn jir_classify_param<'ctx>(
     ctx: &CodegenContext<'ctx>,
 ) -> Result<ParamAbi<'ctx>, String> {
     let t = jfn.param_types[i];
+    let mode = jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let);
     if jfn.is_extern {
+        // `mut` params and arrays are what call sites pass them as: a
+        // pointer (C's `T*`, and array decay). By-value aggregates never get
+        // here: they take the C-ABI prototype (`declare_c_abi_fn`).
+        let llvm_type = if mode == ParamMode::Mut || is_by_ref(t, ctx) {
+            ctx.context().pointer_type(0)
+        } else {
+            ctx.get_llvm_type(t)?
+        };
         return Ok(ParamAbi {
             kind: ParamAbiKind::ByValue,
-            llvm_type: Some(ctx.get_llvm_type(t)?),
+            llvm_type: Some(llvm_type),
             pointer_align: 0,
         });
     }
-    let mode = jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let);
     classify_param(mode, t, ctx)
+}
+
+// ---- C-ABI signatures (extern / export with by-value aggregates) ----
+//
+// Jam's own ABI passes every byref aggregate as a pointer to its storage and
+// returns it through an sret slot. C does not: AAPCS64 and SysV split
+// aggregates into Direct / Hfa / Coerce / Memory classes
+// (`abi::classify_c_abi`). Signatures that carry an aggregate by value across
+// the C boundary are therefore lowered twice-over:
+//
+//   extern fn   the prototype is declared with C classes and tagged
+//               `C_ABI_ATTR`; each direct call converts Jam values to C
+//               arguments and lifts the C result back into a Jam slot.
+//   export fn   the body keeps Jam's ABI under `<name>` + `EXPORT_BODY_SUFFIX`
+//               (internal linkage, what Jam callers use); a C-ABI wrapper owns
+//               the exported symbol `<name>` (what C callers and `fn as u64`
+//               get) and forwards to the body.
+//
+// Scalar-only signatures are identical under both ABIs and keep the plain
+// lowering.
+
+/// Marker on prototypes declared with C-ABI classification.
+const C_ABI_ATTR: &str = "jam-c-abi";
+/// LLVM name of an `export fn` body whose exported symbol is a C-ABI wrapper.
+/// `$` never occurs in Jam's mangling (`mod.Type.fn`), so this can't collide.
+const EXPORT_BODY_SUFFIX: &str = "$jam.body";
+
+/// Does `ty` resolve to an array? Arrays are byref in Jam, but C has no
+/// array parameters or returns: Jam's pointer lowering already is C's array
+/// decay, so arrays never take the by-value C-ABI path.
+fn is_array_shaped(ty: TypeIdx, ctx: &CodegenContext) -> bool {
+    if ty.is_none() {
+        return false;
+    }
+    let ty = ctx.requalify_type(ty, &ctx.current_body_module());
+    let k = ctx.type_pool.get(ty);
+    let next = match k.kind {
+        TypeKind::Array => return true,
+        TypeKind::ArrayExpr => ctx.resolve_array_expr(ty),
+        TypeKind::GenericCall => ctx.resolve_generic_call(ty),
+        TypeKind::Named => {
+            let name =
+                String::from_utf8_lossy(&ctx.string_pool.get(StringIdx::new(k.a))).into_owned();
+            // A registered type is no array. Not chasing it also stops the
+            // loop through swapped import handles (`const a = import("b");
+            // const b = import("a")`), whose aliases map `a.S` and `b.S`
+            // onto each other.
+            if ctx.is_struct_name_registered(&name)
+                || ctx.is_union_name_registered(&name)
+                || ctx.is_enum_name_registered(&name)
+            {
+                return false;
+            }
+            ctx.lookup_type_alias(&name)
+        }
+        _ => return false,
+    };
+    !next.is_none() && next != ty && is_array_shaped(next, ctx)
+}
+
+/// A struct, union or payload enum: what C passes and returns by value.
+fn is_c_aggregate(ty: TypeIdx, ctx: &CodegenContext) -> bool {
+    is_by_ref(ty, ctx) && !is_array_shaped(ty, ctx)
+}
+
+/// Does a C caller of `jfn` expect an integer extension Jam's own ABI doesn't
+/// do (a narrow int / bool param or return; see [`c_int_ext`])?
+fn needs_c_int_ext(jfn: &JirFunction, ctx: &CodegenContext) -> bool {
+    let ext_param = |i: usize| {
+        jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let) != ParamMode::Mut
+            && c_int_ext(jfn.param_types[i], ctx).is_some()
+    };
+    c_int_ext(jfn.return_type, ctx).is_some() || (0..jfn.param_types.len()).any(ext_param)
+}
+
+/// Does `jfn`'s signature pass or return an aggregate by value? Only then do
+/// its Jam and C lowerings differ.
+fn passes_aggregates(jfn: &JirFunction, ctx: &CodegenContext) -> bool {
+    let by_value = |i: usize| {
+        jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let) != ParamMode::Mut
+            && is_c_aggregate(jfn.param_types[i], ctx)
+    };
+    is_c_aggregate(jfn.return_type, ctx) || (0..jfn.param_types.len()).any(by_value)
+}
+
+/// Does `jfn` pass or return an aggregate by value across the C boundary?
+fn needs_c_abi(jfn: &JirFunction, ctx: &CodegenContext) -> bool {
+    (jfn.is_extern || jfn.is_export) && passes_aggregates(jfn, ctx)
+}
+
+/// `(GPRs, SSE regs)` a pass-through param takes on x86-64 SysV.
+fn sysv_scalar_regs(ty: TypeIdx, mode: ParamMode, ctx: &CodegenContext) -> (u32, u32) {
+    if mode == ParamMode::Mut || is_by_ref(ty, ctx) {
+        return (1, 0); // a pointer
+    }
+    let ty = ctx.requalify_type(ty, &ctx.current_body_module());
+    match ctx.type_pool.get(ty).kind {
+        TypeKind::Float => (0, 1),
+        TypeKind::Slice => (2, 0), // {ptr, len}
+        _ => (1, 0),
+    }
+}
+
+/// The C ABI's integer-extension attribute for a scalar `ty` passed or
+/// returned in a register, as clang emits it per target: on x86-64 SysV and
+/// Apple (arm64 and x86-64), `bool` and unsigned integers narrower than 32
+/// bits are zero-extended and signed ones sign-extended; Win64 extends only
+/// `bool`; AAPCS64 elsewhere (Linux) extends nothing, the upper bits are
+/// unspecified and neither side may rely on them.
+fn c_int_ext(ty: TypeIdx, ctx: &CodegenContext) -> Option<&'static str> {
+    use crate::target::{Arch, Os};
+    let (arch, os) = (ctx.target_arch(), ctx.target_os());
+    if arch == Arch::AArch64 && os != Os::MacOs {
+        return None;
+    }
+    if ty == builtin::BOOL {
+        return Some("zeroext");
+    }
+    if arch == Arch::X86_64 && os == Os::Windows {
+        return None;
+    }
+    let k = ctx.type_pool.get(ty);
+    if k.kind == TypeKind::Int && k.a < 32 {
+        return Some(if k.b != 0 { "signext" } else { "zeroext" });
+    }
+    // A unit-only enum crosses as its `u8` tag: extended like a `u8`.
+    if let Some(en) = ctx.enum_name_of(ty)
+        && !ctx.enum_has_payload_by_name(&en).unwrap_or(true)
+    {
+        return Some("zeroext");
+    }
+    None
+}
+
+/// One by-value aggregate for the C side, resolved in the declaring module.
+/// A zero-sized one has no argument under SysV and AAPCS64 (C drops empty
+/// records); MSVC gives an empty C struct a nonzero size, so Win64 passes it
+/// as one integer register (contents unread).
+fn c_value(ty: TypeIdx, ctx: &CodegenContext) -> Result<CParam, String> {
+    let ty = crate::abi::abi_concrete(ty, ctx);
+    if ctx.type_size(ty)? == 0 {
+        if ctx.target_os() == crate::target::Os::Windows {
+            return Ok(CParam::Value(
+                ty,
+                CAbiClass::Coerce {
+                    w0: CWord::Int,
+                    w1: None,
+                },
+            ));
+        }
+        return Ok(CParam::Skip);
+    }
+    Ok(CParam::Value(ty, classify_c_abi(ty, ctx)?))
+}
+
+/// The C lowering of `jfn`'s signature, final classes included (x86-64 SysV
+/// register demotion runs here, once, for every user of the prototype).
+fn c_signature(jfn: &JirFunction, ctx: &CodegenContext) -> Result<CSig, String> {
+    let rt = jfn.return_type;
+    let ret = if rt.is_none() || rt == builtin::NORETURN || !is_by_ref(rt, ctx) {
+        CParam::Pass
+    } else if is_array_shaped(rt, ctx) {
+        // C has no array returns: keep Jam's sret shape.
+        CParam::Value(
+            ctx.requalify_type(rt, &ctx.current_body_module()),
+            CAbiClass::Memory { byval: false },
+        )
+    } else {
+        c_value(rt, ctx)?
+    };
+    let mut params = Vec::with_capacity(jfn.param_types.len());
+    let mut scalars = Vec::with_capacity(jfn.param_types.len());
+    for (i, &t) in jfn.param_types.iter().enumerate() {
+        let mode = jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let);
+        if mode == ParamMode::Mut || !is_c_aggregate(t, ctx) {
+            params.push(CParam::Pass);
+            scalars.push(sysv_scalar_regs(t, mode, ctx));
+        } else {
+            params.push(c_value(t, ctx)?);
+            scalars.push((0, 0));
+        }
+    }
+    if is_sysv_x86_64(ctx) {
+        let sret = matches!(ret, CParam::Value(_, CAbiClass::Memory { .. }));
+        sysv_demote(&mut params, &scalars, sret);
+    }
+    Ok(CSig { ret, params })
+}
+
+fn is_sysv_x86_64(ctx: &CodegenContext) -> bool {
+    ctx.target_arch() == crate::target::Arch::X86_64
+        && ctx.target_os() != crate::target::Os::Windows
+}
+
+/// The LLVM function holding `jfn`'s body, as declared: what Jam callers
+/// target.
+fn llvm_body_name(jfn: &JirFunction, ctx: &CodegenContext) -> String {
+    if jfn.is_export && needs_c_abi(jfn, ctx) {
+        format!("{}{EXPORT_BODY_SUFFIX}", jfn.name)
+    } else {
+        jfn.name.clone()
+    }
+}
+
+/// The function holding the body of `name`: the wrapped export body when one
+/// was declared, else `name` itself. Decided by what exists in the module,
+/// so it can't drift from the declaration with the current module scope.
+fn body_fn<'ctx>(ctx: &CodegenContext<'ctx>, name: &str) -> Option<Function<'ctx>> {
+    let module = ctx.module();
+    module
+        .get_function(&format!("{name}{EXPORT_BODY_SUFFIX}"))
+        .or_else(|| module.get_function(name))
+}
+
+/// Alignment of a coerced-word temp holding a `ty`: words need 8, and the
+/// struct's own alignment must not be lowered.
+fn coerce_tmp_align(ty: TypeIdx, ctx: &CodegenContext) -> Result<u64, String> {
+    Ok(ctx.type_align(ty)?.max(8))
+}
+
+/// One or two 64-bit words (`i64` / `double` per eightbyte class).
+///
+/// AArch64 spells two words `[2 x i64]`, as clang and Zig do: LLVM gives
+/// arrays AAPCS64's consecutive-register rule, so a 16-byte struct that no
+/// longer fits in x0..x7 goes wholly to the stack. A `{i64, i64}` struct
+/// would be split between x7 and the stack. x86-64 keeps the eightbyte
+/// struct (INTEGER/SSE words may mix there; `abi::sysv_demote` handles
+/// register exhaustion).
+fn c_coerce_ty<'ctx>(ctx: &CodegenContext<'ctx>, w0: CWord, w1: Option<CWord>) -> Type<'ctx> {
+    let word = |w: CWord| {
+        if w == CWord::Fp {
+            ctx.context().f64_type()
+        } else {
+            ctx.context().i64_type()
+        }
+    };
+    match w1 {
+        None => word(w0),
+        Some(_) if ctx.target_arch() != crate::target::Arch::X86_64 => {
+            ctx.context().i64_type().array_type(2)
+        }
+        Some(w1) => ctx.context().struct_type(&[word(w0), word(w1)], false),
+    }
+}
+
+/// An HFA as `[N x float]` / `[N x double]` (AAPCS64, same reason as the
+/// `[2 x i64]` above: v0..v7 are consecutive or the whole value is on the
+/// stack). Layout-identical to the aggregate, so loads and stores through
+/// its storage are sound.
+fn c_hfa_ty<'ctx>(ty: TypeIdx, ctx: &CodegenContext<'ctx>) -> Result<Type<'ctx>, String> {
+    let (bits, count) = c_abi_float_leaves(ty, ctx).ok_or("HFA class without float leaves")?;
+    let elem = match bits {
+        32 => ctx.context().f32_type(),
+        64 => ctx.context().f64_type(),
+        _ => return ctx.get_llvm_type(ty),
+    };
+    Ok(elem.array_type(count as u64))
+}
+
+/// How a C argument of class `class` travels in LLVM.
+fn c_param_llvm_ty<'ctx>(
+    ty: TypeIdx,
+    class: CAbiClass,
+    ctx: &CodegenContext<'ctx>,
+) -> Result<Type<'ctx>, String> {
+    Ok(match class {
+        CAbiClass::Direct => ctx.get_llvm_type(ty)?,
+        CAbiClass::Hfa => c_hfa_ty(ty, ctx)?,
+        CAbiClass::Coerce { w0, w1 } => c_coerce_ty(ctx, w0, w1),
+        CAbiClass::Memory { .. } => ctx.context().pointer_type(0),
+    })
+}
+
+/// LLVM return type of a C prototype whose Jam return type is `rt`.
+fn c_ret_llvm_ty<'ctx>(
+    rt: TypeIdx,
+    ret: CParam,
+    ctx: &CodegenContext<'ctx>,
+) -> Result<Type<'ctx>, String> {
+    Ok(match ret {
+        CParam::Pass if rt.is_none() => ctx.context().void_type(),
+        CParam::Pass => ctx.get_llvm_type(rt)?,
+        CParam::Skip | CParam::Value(_, CAbiClass::Memory { .. }) => ctx.context().void_type(),
+        CParam::Value(t, class) => c_param_llvm_ty(t, class, ctx)?,
+    })
+}
+
+/// Declare `name` with `jfn`'s signature under C-ABI classification, and
+/// record the lowering for its call sites (and an export's wrapper).
+fn declare_c_abi_fn<'ctx>(
+    jfn: &JirFunction,
+    ctx: &CodegenContext<'ctx>,
+    name: &str,
+) -> Result<Function<'ctx>, String> {
+    if let Some(f) = ctx.module().get_function(name)
+        && f.has_marker_attr(C_ABI_ATTR)
+    {
+        return Ok(f);
+    }
+    let sig = c_signature(jfn, ctx)?;
+    let sret = matches!(sig.ret, CParam::Value(_, CAbiClass::Memory { .. }));
+    let mut arg_types = Vec::with_capacity(jfn.param_types.len() + sret as usize);
+    if sret {
+        arg_types.push(ctx.context().pointer_type(0));
+    }
+    let mut byval: Vec<(u32, TypeIdx)> = Vec::new();
+    let mut exts: Vec<(u32, &'static str)> = Vec::new();
+    for (i, (&t, &p)) in jfn.param_types.iter().zip(&sig.params).enumerate() {
+        let mode = jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let);
+        match p {
+            // What Jam's own ABI hands over: a pointer for `mut` params and
+            // arrays, the scalar otherwise.
+            CParam::Pass => {
+                if mode == ParamMode::Mut || is_by_ref(t, ctx) {
+                    arg_types.push(ctx.context().pointer_type(0));
+                } else {
+                    if let Some(ext) = c_int_ext(t, ctx) {
+                        exts.push((arg_types.len() as u32, ext));
+                    }
+                    arg_types.push(ctx.get_llvm_type(t)?);
+                }
+            }
+            CParam::Skip => {}
+            CParam::Value(pt, class) => {
+                if matches!(class, CAbiClass::Memory { byval: true }) {
+                    byval.push((arg_types.len() as u32, pt));
+                }
+                arg_types.push(c_param_llvm_ty(pt, class, ctx)?);
+            }
+        }
+    }
+    let ret_type = c_ret_llvm_ty(jfn.return_type, sig.ret, ctx)?;
+    // Every type the attributes need, BEFORE the function exists: one that
+    // can't lower yet (an imported payload enum ahead of the type bodies)
+    // must fail the whole declaration, not leave a half-declared function
+    // with no `sret`/`byval` that call sites then bind to.
+    let sret_ty = match sig.ret {
+        CParam::Value(rt, CAbiClass::Memory { .. }) => {
+            Some((ctx.get_llvm_type(rt)?, ctx.type_align(rt)? as u32))
+        }
+        _ => None,
+    };
+    let byval: Vec<(u32, Type<'ctx>, u32)> = byval
+        .into_iter()
+        .map(|(idx, pt)| Ok((idx, ctx.get_llvm_type(pt)?, ctx.type_align(pt)? as u32)))
+        .collect::<Result<_, String>>()?;
+    let f = ctx
+        .module()
+        .add_function(name, ret_type.fn_type(&arg_types, jfn.is_var_args));
+    f.apply_default_attrs(jfn.is_extern);
+    if jfn.return_type == builtin::NORETURN {
+        f.set_no_return();
+    }
+    if let Some((ty, align)) = sret_ty {
+        f.add_param_attr_sret(0, ty, align);
+    }
+    for (idx, ty, align) in byval {
+        f.add_param_attr_byval(idx, ty, align);
+    }
+    for (idx, ext) in exts {
+        f.add_param_attr_ext(idx, ext);
+    }
+    if matches!(sig.ret, CParam::Pass)
+        && let Some(ext) = c_int_ext(jfn.return_type, ctx)
+    {
+        f.add_ret_attr_ext(ext);
+    }
+    f.set_linkage(Linkage::External);
+    f.set_call_conv(CallConv::C);
+    f.add_marker_attr(C_ABI_ATTR);
+    ctx.record_c_sig(name, sig);
+    if jfn.is_export {
+        append_to_used(ctx.module(), f);
+    }
+    Ok(f)
+}
+
+/// A Jam value (aggregates: a pointer to storage) as a C argument of `class`.
+/// Never hands C the caller's storage where C expects to own a copy.
+fn lower_c_arg<'ctx>(
+    lctx: &mut JirCodegenCtx<'_, 'ctx>,
+    av: Value<'ctx>,
+    pt: TypeIdx,
+    class: CAbiClass,
+) -> Result<Value<'ctx>, String> {
+    Ok(match class {
+        CAbiClass::Direct => av,
+        CAbiClass::Hfa => {
+            let hfa_ty = c_hfa_ty(pt, lctx.ctx)?;
+            lctx.ctx.builder().load(hfa_ty, av, "arg.hfa")
+        }
+        CAbiClass::Coerce { w0, w1 } => {
+            // memcpy into a word-aligned temp so a 12-byte struct never
+            // over-reads, then load the coerced value.
+            let ct = c_coerce_ty(lctx.ctx, w0, w1);
+            let size = lctx.ctx.type_size(pt)?;
+            let align = lctx.ctx.type_align(pt)?;
+            let tmp_align = coerce_tmp_align(pt, lctx.ctx)?;
+            let tmp = lctx.ctx.builder().alloca(ct, tmp_align, "arg.coerce");
+            lctx.ctx.builder().memcpy(tmp, tmp_align, av, align, size);
+            lctx.ctx.builder().load(ct, tmp, "arg.coerce.v")
+        }
+        CAbiClass::Memory { .. } => {
+            let agg_ty = lctx.ctx.get_llvm_type(pt)?;
+            let size = lctx.ctx.type_size(pt)?;
+            let align = lctx.ctx.type_align(pt)?;
+            let copy = lctx.ctx.builder().alloca(agg_ty, align, "arg.mem.copy");
+            lctx.ctx.builder().memcpy(copy, align, av, align, size);
+            copy
+        }
+    })
+}
+
+/// A variadic argument past the fixed params: C passes it by its own type
+/// (default argument promotions don't touch aggregates). `None` when C has
+/// no argument for it (a zero-sized aggregate).
+fn lower_c_vararg<'ctx>(
+    lctx: &mut JirCodegenCtx<'_, 'ctx>,
+    av: Value<'ctx>,
+    t: TypeIdx,
+    byval: &mut Vec<(u32, TypeIdx)>,
+    index: u32,
+) -> Result<Option<Value<'ctx>>, String> {
+    if !is_c_aggregate(t, lctx.ctx) {
+        // C's default argument promotions for a `...` argument: `float`
+        // becomes `double`, and `bool` and integers narrower than `int`
+        // widen to `int` by their signedness (`printf("%f", x_f32)` printed
+        // 0.0, `%d` of an `i8` printed its byte).
+        let k = lctx.ctx.type_pool.get(t);
+        let b = lctx.ctx.builder();
+        if k.kind == TypeKind::Float && k.a == 32 {
+            return Ok(Some(b.fp_cast(av, lctx.ctx.context().f64_type(), "vararg.fpext")));
+        }
+        if t == builtin::BOOL || (k.kind == TypeKind::Int && k.a < 32) {
+            let signed = t != builtin::BOOL && k.b != 0;
+            return Ok(Some(b.int_cast(av, lctx.ctx.context().i32_type(), signed, "vararg.ext")));
+        }
+        // A unit-only enum is its `u8` tag: promoted like an unsigned char.
+        if let Some(en) = lctx.ctx.enum_name_of(t)
+            && !lctx.ctx.enum_has_payload_by_name(&en).unwrap_or(true)
+        {
+            return Ok(Some(b.int_cast(av, lctx.ctx.context().i32_type(), false, "vararg.ext")));
+        }
+        return Ok(Some(av));
+    }
+    if lctx.ctx.type_size(t)? == 0 {
+        return Ok(None);
+    }
+    let class = classify_c_abi(t, lctx.ctx)?;
+    if matches!(class, CAbiClass::Memory { byval: true }) {
+        byval.push((index, t));
+    }
+    Ok(Some(lower_c_arg(lctx, av, t, class)?))
+}
+
+/// Direct call to a C-ABI prototype, lowered by its recorded [`CSig`].
+/// `args[0]` is Jam's sret slot when the caller sees a byref return (astgen
+/// adds it from Jam's own classification); the C result is lifted into it.
+fn emit_c_abi_call<'ctx>(
+    lctx: &mut JirCodegenCtx<'_, 'ctx>,
+    f: Function<'ctx>,
+    symbol: &str,
+    ret_ty: TypeIdx,
+    arg_refs: &[JirRef],
+    args: &[Value<'ctx>],
+) -> Result<Option<Value<'ctx>>, String> {
+    let sig = lctx
+        .ctx
+        .c_sig(symbol)
+        .ok_or_else(|| format!("C-ABI call: no signature recorded for `{symbol}`"))?;
+    let has_slot = is_by_ref(ret_ty, lctx.ctx);
+    let (slot, jam_refs, jam_args) = if has_slot {
+        (Some(args[0]), &arg_refs[1..], &args[1..])
+    } else {
+        (None, arg_refs, args)
+    };
+    let ret_is_memory = matches!(sig.ret, CParam::Value(_, CAbiClass::Memory { .. }));
+
+    let mut c_args = Vec::with_capacity(args.len());
+    if ret_is_memory {
+        c_args.push(slot.ok_or("C-ABI call: Memory return without a slot")?);
+    }
+    let mut byval: Vec<(u32, TypeIdx)> = Vec::new();
+    for (i, (&r, &av)) in jam_refs.iter().zip(jam_args).enumerate() {
+        match sig.params.get(i) {
+            Some(CParam::Pass) => c_args.push(av),
+            Some(CParam::Skip) => {}
+            Some(&CParam::Value(pt, class)) => {
+                if matches!(class, CAbiClass::Memory { byval: true }) {
+                    byval.push((c_args.len() as u32, pt));
+                }
+                let lowered = lower_c_arg(lctx, av, pt, class)?;
+                c_args.push(lowered);
+            }
+            // Variadic extras lower by the argument's own type (Zig's
+            // `ParamTypeIterator.nextCall` does the same).
+            None => {
+                let t = lctx.jfn.get_inst(r).ty;
+                let idx = c_args.len() as u32;
+                if let Some(v) = lower_c_vararg(lctx, av, t, &mut byval, idx)? {
+                    c_args.push(v);
+                }
+            }
+        }
+    }
+    let returns_value = match sig.ret {
+        CParam::Pass => !ret_ty.is_none() && ret_ty != builtin::NORETURN,
+        CParam::Skip | CParam::Value(_, CAbiClass::Memory { .. }) => false,
+        CParam::Value(..) => true,
+    };
+    let result = lctx
+        .ctx
+        .builder()
+        .call(f, &c_args, if returns_value { "call.c" } else { "" });
+    for (idx, pt) in byval {
+        let agg_ty = lctx.ctx.get_llvm_type(pt)?;
+        let align = lctx.ctx.type_align(pt)?;
+        result.add_call_site_byval(idx, agg_ty, align as u32);
+    }
+    let Some(slot) = slot else {
+        return Ok(Some(result));
+    };
+    // Never write past the caller's slot, whatever the callee's type says.
+    let slot_size = lctx.ctx.type_size(ret_ty)?;
+    match sig.ret {
+        CParam::Value(rt, CAbiClass::Memory { .. }) => {
+            let agg_ty = lctx.ctx.get_llvm_type(rt)?;
+            let align = lctx.ctx.type_align(rt)?;
+            result.add_call_site_sret(0, agg_ty, align as u32);
+        }
+        CParam::Value(rt, CAbiClass::Coerce { w0, w1 }) => {
+            // Spill the words to a word-sized temp, then copy only the
+            // struct's bytes into the Jam slot.
+            let ct = c_coerce_ty(lctx.ctx, w0, w1);
+            let tmp_align = coerce_tmp_align(rt, lctx.ctx)?;
+            let tmp = lctx.ctx.builder().alloca(ct, tmp_align, "ret.coerce");
+            lctx.ctx.builder().store(result, tmp);
+            let size = lctx.ctx.type_size(rt)?.min(slot_size);
+            let align = lctx.ctx.type_align(ret_ty)?;
+            lctx.ctx.builder().memcpy(slot, align, tmp, tmp_align, size);
+        }
+        CParam::Value(rt, CAbiClass::Hfa | CAbiClass::Direct) => {
+            if lctx.ctx.type_size(rt)? <= slot_size {
+                lctx.ctx.builder().store(result, slot);
+            }
+        }
+        CParam::Skip => {}
+        CParam::Pass => {
+            if returns_value {
+                lctx.ctx.builder().store(result, slot);
+            }
+        }
+    }
+    Ok(Some(slot))
+}
+
+/// Body of an `export fn`'s C-ABI wrapper: C arguments in, Jam-ABI body call,
+/// C return out, all by the wrapper's recorded [`CSig`].
+///
+/// Ownership at this boundary is C's: a by-value aggregate is the callee's
+/// own copy, so a `move` param's drop runs on that copy. A Jam caller that
+/// reaches the wrapper by address (`@callC(.., f as u64, ..)`) keeps its
+/// original too, so a drop-bearing `move` arg is dropped twice; call the
+/// export directly (which targets the Jam-ABI body) to move it.
+fn emit_export_wrapper<'ctx>(jfn: &JirFunction, ctx: &CodegenContext<'ctx>) -> Result<(), String> {
+    let w = ctx
+        .module()
+        .get_function(&jfn.name)
+        .ok_or("export wrapper: prototype missing")?;
+    let body = body_fn(ctx, &jfn.name).ok_or("export wrapper: body missing")?;
+    emit_c_wrapper(jfn, ctx, &jfn.name, w, body)
+}
+
+/// Fill `w`, declared by `declare_c_abi_fn` under `w_name`, with a C-ABI to
+/// Jam-ABI adapter that calls `body` (`jfn`'s Jam-ABI function).
+fn emit_c_wrapper<'ctx>(
+    jfn: &JirFunction,
+    ctx: &CodegenContext<'ctx>,
+    w_name: &str,
+    w: Function<'ctx>,
+    body: Function<'ctx>,
+) -> Result<(), String> {
+    let sig = ctx
+        .c_sig(w_name)
+        .ok_or("C wrapper: no signature recorded")?;
+    let b = ctx.builder();
+    b.position_at_end(w.append_basic_block("entry"));
+
+    let ret_ty = jfn.return_type;
+    let mut ci = 0u32;
+    let c_sret = if matches!(sig.ret, CParam::Value(_, CAbiClass::Memory { .. })) {
+        ci = 1;
+        Some(w.param(0))
+    } else {
+        None
+    };
+    let mut jam_args = Vec::with_capacity(jfn.param_types.len() + 1);
+    // Jam's body returns byref aggregates through a leading slot: reuse C's
+    // sret buffer when there is one, else a local the result is read from.
+    let jam_slot = if is_by_ref(ret_ty, ctx) {
+        let s = match c_sret {
+            Some(p) => p,
+            None => b.alloca(
+                ctx.get_llvm_type(ret_ty)?,
+                ctx.type_align(ret_ty)?,
+                "ret.slot",
+            ),
+        };
+        jam_args.push(s);
+        Some(s)
+    } else {
+        None
+    };
+    for (i, &p) in sig.params.iter().enumerate() {
+        let jam = match p {
+            // Scalars, and `mut` params / arrays that C hands over as
+            // pointers: already what the Jam body takes.
+            CParam::Pass => {
+                ci += 1;
+                w.param(ci - 1)
+            }
+            // C passed nothing; the body still wants storage to point at.
+            CParam::Skip => {
+                let t = jfn.param_types[i];
+                b.alloca(ctx.get_llvm_type(t)?, ctx.type_align(t)?, "arg.empty")
+            }
+            CParam::Value(pt, class) => {
+                let v = w.param(ci);
+                ci += 1;
+                match class {
+                    // C already passed a pointer to its own copy.
+                    CAbiClass::Memory { .. } => v,
+                    CAbiClass::Coerce { w0, w1 } => {
+                        let tmp = b.alloca(
+                            c_coerce_ty(ctx, w0, w1),
+                            coerce_tmp_align(pt, ctx)?,
+                            "arg.coerce",
+                        );
+                        b.store(v, tmp);
+                        tmp
+                    }
+                    // An HFA arrives as `[N x float]`, layout-identical to the
+                    // aggregate, so storing it into its storage is sound.
+                    CAbiClass::Hfa | CAbiClass::Direct => {
+                        let tmp =
+                            b.alloca(ctx.get_llvm_type(pt)?, ctx.type_align(pt)?, "arg.spill");
+                        b.store(v, tmp);
+                        tmp
+                    }
+                }
+            }
+        };
+        jam_args.push(jam);
+    }
+    let returns_scalar = !ret_ty.is_none() && ret_ty != builtin::NORETURN && jam_slot.is_none();
+    let r = b.call(body, &jam_args, if returns_scalar { "body" } else { "" });
+    if ret_ty == builtin::NORETURN {
+        b.unreachable();
+        return Ok(());
+    }
+    match (jam_slot, sig.ret) {
+        (None, _) if ret_ty.is_none() => {
+            b.ret_void();
+        }
+        (None, _) => {
+            b.ret(r);
+        }
+        (Some(_), CParam::Skip | CParam::Value(_, CAbiClass::Memory { .. })) => {
+            b.ret_void();
+        }
+        (Some(slot), CParam::Value(rt, CAbiClass::Coerce { w0, w1 })) => {
+            let ct = c_coerce_ty(ctx, w0, w1);
+            let tmp_align = coerce_tmp_align(rt, ctx)?;
+            let tmp = b.alloca(ct, tmp_align, "ret.coerce");
+            let size = ctx.type_size(rt)?;
+            let align = ctx.type_align(rt)?;
+            b.memcpy(tmp, tmp_align, slot, align, size);
+            let v = b.load(ct, tmp, "ret.coerce.v");
+            b.ret(v);
+        }
+        (Some(slot), CParam::Value(rt, class)) => {
+            let ty = c_param_llvm_ty(rt, class, ctx)?;
+            let v = b.load(ty, slot, "ret.v");
+            b.ret(v);
+        }
+        (Some(slot), CParam::Pass) => {
+            let v = b.load(ctx.get_llvm_type(ret_ty)?, slot, "ret.v");
+            b.ret(v);
+        }
+    }
+    Ok(())
+}
+
+/// Suffix of the internal C-ABI entry of a plain Jam fn whose address is
+/// taken.
+const C_THUNK_SUFFIX: &str = "$jam.cabi";
+
+/// The address a fn-ref to `name` yields. Calls through fn values use the C
+/// ABI (see `CallIndirect`), which externs and exports already have. A plain
+/// Jam fn that passes or returns an aggregate by value takes it by pointer
+/// instead, so its address is an internal C-ABI wrapper over it, built on
+/// first use.
+fn fn_ref_target<'ctx>(ctx: &CodegenContext<'ctx>, name: &str) -> Result<Function<'ctx>, String> {
+    let f = ctx
+        .module()
+        .get_function(name)
+        .ok_or_else(|| format!("unknown fn-ref `{name}`"))?;
+    if f.has_marker_attr(C_ABI_ATTR) {
+        return Ok(f);
+    }
+    let Some(ast) = ctx.get_function_ast(name) else {
+        return Ok(f);
+    };
+    // An extern is C already; so is an export, whose symbol carries the C
+    // attributes itself (one address, whichever side takes it).
+    if ast.is_extern || ast.is_export {
+        return Ok(f);
+    }
+    let mut sig = JirFunction::new();
+    sig.name = name.to_string();
+    sig.param_types = ast.args.iter().map(|p| p.ty).collect();
+    sig.param_modes = ast.args.iter().map(|p| p.mode).collect();
+    sig.return_type = ast.return_type;
+    sig.module_path = ast.module_path.clone();
+    sig.is_var_args = ast.is_var_args;
+    ctx.push_body_module(sig.module_path.clone());
+    let r = (|| {
+        // A C caller (a callback) also expects narrow ints extended, which
+        // the internal fn doesn't do: route those through the thunk too.
+        if !passes_aggregates(&sig, ctx) && !needs_c_int_ext(&sig, ctx) {
+            return Ok(f);
+        }
+        let thunk = format!("{name}{C_THUNK_SUFFIX}");
+        if let Some(t) = ctx.module().get_function(&thunk) {
+            return Ok(t);
+        }
+        let saved = ctx.builder().insert_block();
+        let w = declare_c_abi_fn(&sig, ctx, &thunk)?;
+        w.set_linkage(Linkage::Internal);
+        let r = emit_c_wrapper(&sig, ctx, &thunk, w, f);
+        if let Some(bb) = saved {
+            ctx.builder().position_at_end(bb);
+        }
+        r.map(|_| w)
+    })();
+    ctx.pop_body_module();
+    r
 }
 
 /// Emit the LLVM function declaration (signature + linkage + ABI attributes).
@@ -89,9 +845,43 @@ pub fn jir_declare_prototype<'ctx>(
     jfn: &JirFunction,
     ctx: &CodegenContext<'ctx>,
 ) -> Result<Function<'ctx>, String> {
+    let c_abi = needs_c_abi(jfn, ctx);
+    if c_abi {
+        let f = declare_c_abi_fn(jfn, ctx, &jfn.name)?;
+        if jfn.is_extern {
+            return Ok(f);
+        }
+        // export: fall through to declare the Jam-ABI body under its own name.
+    }
+    let llvm_name = llvm_body_name(jfn, ctx);
+    if c_abi && let Some(f) = ctx.module().get_function(&llvm_name) {
+        return Ok(f);
+    }
+
     let rabi = jir_classify_return(jfn, ctx)?;
     let sret = rabi.kind == ReturnAbiKind::Indirect;
 
+    // Already declared (an early pass ran before every type's LLVM body
+    // existed, so a payload enum's `sret` attribute couldn't be built): add
+    // what's missing instead of declaring a renamed duplicate.
+    if !jfn.is_extern
+        && let Some(f) = ctx.module().get_function(&llvm_name)
+    {
+        if sret && !f.uses_sret() {
+            f.add_param_attr_sret(0, ctx.get_llvm_type(jfn.return_type)?, rabi.sret_align);
+        }
+        return Ok(f);
+    }
+
+    // The `sret` pointee, built BEFORE declaring: when its LLVM type doesn't
+    // exist yet (a payload enum before the type bodies are filled), fail
+    // without leaving a half-declared function (no `sret`, default linkage)
+    // for the post-fill pass to find.
+    let sret_ty = if sret {
+        Some(ctx.get_llvm_type(jfn.return_type)?)
+    } else {
+        None
+    };
     let mut arg_types = Vec::with_capacity(jfn.param_types.len() + sret as usize);
     if sret {
         // Leading `ptr` carries the caller-owned return slot (sret attr below).
@@ -113,16 +903,17 @@ pub fn jir_declare_prototype<'ctx>(
         rabi.direct_type.ok_or("Direct return missing LLVM type")?
     };
     let ft = ret_type.fn_type(&arg_types, jfn.is_var_args);
-    let f = ctx.module().add_function(&jfn.name, ft);
+    let f = ctx.module().add_function(&llvm_name, ft);
     f.apply_default_attrs(jfn.is_extern);
     if jfn.return_type == builtin::NORETURN {
         f.set_no_return();
     }
-    if sret {
-        f.add_param_attr_sret(0, ctx.get_llvm_type(jfn.return_type)?, rabi.sret_align);
+    if let Some(t) = sret_ty {
+        f.add_param_attr_sret(0, t, rabi.sret_align);
     }
 
-    let external_linkage = jfn.is_extern || jfn.is_export || jfn.name == "main";
+    // A wrapped export's body is internal: the C-ABI wrapper owns the symbol.
+    let external_linkage = !c_abi && (jfn.is_extern || jfn.is_export || jfn.name == "main");
     if external_linkage {
         f.set_linkage(Linkage::External);
         // `export` symbols exist for C callers the optimizer can't see — pin
@@ -131,16 +922,19 @@ pub fn jir_declare_prototype<'ctx>(
             append_to_used(ctx.module(), f);
         }
         f.set_call_conv(CallConv::C);
-        // C ABI requires bool args/returns to be zero-extended to the register
-        // width. Internal-linkage callers use our own ABI, so we skip zext.
+        // C ABI: bool and narrow integer args/returns are extended to the
+        // register width. Internal-linkage callers use our own ABI.
         let arg_offset = if sret { 1u32 } else { 0 };
         for i in 0..jfn.param_types.len() {
-            if jfn.param_types[i] == builtin::BOOL {
-                f.add_param_attr_zeroext(i as u32 + arg_offset);
+            let mode = jfn.param_modes.get(i).copied().unwrap_or(ParamMode::Let);
+            if mode != ParamMode::Mut
+                && let Some(ext) = c_int_ext(jfn.param_types[i], ctx)
+            {
+                f.add_param_attr_ext(i as u32 + arg_offset, ext);
             }
         }
-        if !sret && jfn.return_type == builtin::BOOL {
-            f.add_ret_attr_zeroext();
+        if !sret && let Some(ext) = c_int_ext(jfn.return_type, ctx) {
+            f.add_ret_attr_ext(ext);
         }
     } else {
         f.set_linkage(Linkage::Internal);
@@ -388,11 +1182,7 @@ fn emit_inst_impl<'ctx>(
         // ---- function parameters ----
         JirTag::Param => {
             // When the function uses sret, source param `i` is LLVM arg `i+1`.
-            let f = lctx
-                .ctx
-                .module()
-                .get_function(&lctx.jfn.name)
-                .ok_or("Param: fn missing")?;
+            let f = body_fn(lctx.ctx, &lctx.jfn.name).ok_or("Param: fn missing")?;
             let arg_offset = if jir_return_is_sret(lctx.jfn, lctx.ctx) {
                 1
             } else {
@@ -401,11 +1191,7 @@ fn emit_inst_impl<'ctx>(
             Ok(Some(f.param(inst.a + arg_offset)))
         }
         JirTag::SretArg => {
-            let f = lctx
-                .ctx
-                .module()
-                .get_function(&lctx.jfn.name)
-                .ok_or("SretArg: fn missing")?;
+            let f = body_fn(lctx.ctx, &lctx.jfn.name).ok_or("SretArg: fn missing")?;
             Ok(Some(f.param(0)))
         }
 
@@ -746,12 +1532,7 @@ fn emit_inst_impl<'ctx>(
         JirTag::FnRef => {
             let name = String::from_utf8_lossy(&lctx.ctx.string_pool.get(StringIdx::new(inst.a)))
                 .into_owned();
-            let f = lctx
-                .ctx
-                .module()
-                .get_function(&name)
-                .ok_or_else(|| format!("unknown fn-ref `{name}`"))?;
-            let fn_val = f.as_value();
+            let fn_val = fn_ref_target(lctx.ctx, &name)?.as_value();
             if lctx.ctx.type_pool.get(inst.ty).kind == TypeKind::Fn {
                 return Ok(Some(fn_val)); // typed fn-pointer: already a ptr value
             }
@@ -773,18 +1554,52 @@ fn emit_inst_impl<'ctx>(
         JirTag::Call => {
             let symbol = String::from_utf8_lossy(&lctx.ctx.string_pool.get(StringIdx::new(inst.a)))
                 .into_owned();
-            let f = lctx
-                .ctx
-                .module()
-                .get_function(&symbol)
+            // A wrapped `export fn` is called through its Jam-ABI body; the
+            // exported symbol is the C-ABI wrapper for C callers.
+            let module = lctx.ctx.module();
+            let f = module
+                .get_function(&format!("{symbol}{EXPORT_BODY_SUFFIX}"))
+                .or_else(|| module.get_function(&symbol))
                 .ok_or_else(|| format!("unknown callee `{symbol}`"))?;
             let extra = inst.b;
             let arg_count = lctx.jfn.get_extra(extra);
             let callee_uses_sret = f.uses_sret();
+            let mut arg_refs = Vec::with_capacity(arg_count as usize);
             let mut args = Vec::with_capacity(arg_count as usize);
             for i in 0..arg_count {
                 let ar = lctx.jfn.get_extra(extra + 1 + i);
+                arg_refs.push(ar);
                 args.push(emit_inst(lctx, ar)?.ok_or("call arg")?);
+            }
+            if f.has_marker_attr(C_ABI_ATTR) {
+                return emit_c_abi_call(lctx, f, &symbol, inst.ty, &arg_refs, &args);
+            }
+            if f.is_var_arg() && !callee_uses_sret {
+                // A variadic extern with scalar-only fixed params keeps the
+                // plain prototype, but aggregate extras still cross by value
+                // under C rules.
+                let fixed = f.count_params() as usize;
+                let mut c_args = Vec::with_capacity(args.len());
+                let mut byval: Vec<(u32, TypeIdx)> = Vec::new();
+                for (k, (&r, &av)) in arg_refs.iter().zip(&args).enumerate() {
+                    if k < fixed {
+                        c_args.push(av);
+                        continue;
+                    }
+                    let t = lctx.jfn.get_inst(r).ty;
+                    let idx = c_args.len() as u32;
+                    if let Some(v) = lower_c_vararg(lctx, av, t, &mut byval, idx)? {
+                        c_args.push(v);
+                    }
+                }
+                let name = if inst.ty.is_none() { "" } else { "call" };
+                let result = lctx.ctx.builder().call(f, &c_args, name);
+                for (idx, pt) in byval {
+                    let agg_ty = lctx.ctx.get_llvm_type(pt)?;
+                    let align = lctx.ctx.type_align(pt)?;
+                    result.add_call_site_byval(idx, agg_ty, align as u32);
+                }
+                return Ok(Some(result));
             }
             if callee_uses_sret {
                 // LLVM call returns void; the result is in args[0] (the sret
@@ -797,127 +1612,84 @@ fn emit_inst_impl<'ctx>(
         }
         JirTag::CallIndirect => {
             // Indirect calls target the C ABI (that's what fn-typed values
-            // exist for: objc_msgSend puns, dlsym'd addresses, @callC).
-            // Per-type, per-arch classification — see abi::classify_c_abi:
-            //   Direct    natural LLVM type
-            //   Hfa       natural struct value (aarch64; LLVM splits into
-            //             v0..v3)
-            //   Coerce    one or two 64-bit words, i64 / double per the
-            //             eightbyte classes, so sub-word fields pack
-            //             per-register, not per-member
-            //   Memory    args: caller copy — plain pointer (aarch64) or
-            //             byval stack copy (x86-64)
-            //             return: sret pointer (x8 / rdi)
+            // exist for: objc_msgSend puns, dlsym'd addresses, @callC, and a
+            // Jam fn's address, which is its C-ABI entry; see
+            // `fn_ref_target`). The fn type is lowered by `c_signature`, the
+            // same as an extern's prototype, so caller and callee agree on
+            // every shape: zero-sized args are dropped, arrays pass as
+            // pointers, x86-64 SysV demotes on register exhaustion.
             let callee_val = emit_inst(lctx, inst.a)?.ok_or("CallIndirect callee")?;
             let callee_ty = lctx.jfn.get_inst(inst.a).ty;
             let k = lctx.ctx.type_pool.get(callee_ty);
             if k.kind != TypeKind::Fn {
                 return Err("CallIndirect callee is not of Fn type".into());
             }
-            let ret_ty = TypeIdx::new(k.a);
-            let param_tys: Vec<TypeIdx> = lctx.ctx.type_pool.fn_params_at(k.b).to_vec();
-            let i64t = lctx.ctx.context().i64_type();
-            let f64t = lctx.ctx.context().f64_type();
+            let mut fsig = JirFunction::new();
+            fsig.return_type = TypeIdx::new(k.a);
+            fsig.param_types = lctx.ctx.type_pool.fn_params_at(k.b).to_vec();
+            fsig.param_modes = vec![ParamMode::Let; fsig.param_types.len()];
+            let ret_ty = fsig.return_type;
+            let sig = c_signature(&fsig, lctx.ctx)?;
             let ptr_t = lctx.ctx.context().pointer_type(0);
-            let word_ty = |w: CWord| if w == CWord::Fp { f64t } else { i64t };
-            let coerce_ty = |w0: CWord, w1: Option<CWord>| match w1 {
-                None => word_ty(w0),
-                Some(w1) => lctx
-                    .ctx
-                    .context()
-                    .struct_type(&[word_ty(w0), word_ty(w1)], false),
-            };
 
-            let ret_class = if ret_ty.is_none() {
-                CAbiClass::Direct
-            } else {
-                classify_c_abi(ret_ty, lctx.ctx)?
-            };
-            let ret_is_memory = matches!(ret_class, CAbiClass::Memory { .. });
+            let ret_is_memory = matches!(sig.ret, CParam::Value(_, CAbiClass::Memory { .. }));
+            let mut llvm_params = Vec::with_capacity(sig.params.len() + 1);
             let mut sret_slot = None;
-
-            let mut llvm_params = Vec::with_capacity(param_tys.len() + 1);
             if ret_is_memory {
                 let agg_ty = lctx.ctx.get_llvm_type(ret_ty)?;
                 let align = lctx.ctx.type_align(ret_ty)?;
                 sret_slot = Some(lctx.ctx.builder().alloca(agg_ty, align, "ret.sret"));
                 llvm_params.push(ptr_t);
             }
-            let mut param_classes = Vec::with_capacity(param_tys.len());
-            for &pt in &param_tys {
-                let class = classify_c_abi(pt, lctx.ctx)?;
-                llvm_params.push(match class {
-                    CAbiClass::Direct | CAbiClass::Hfa => lctx.ctx.get_llvm_type(pt)?,
-                    CAbiClass::Coerce { w0, w1 } => coerce_ty(w0, w1),
-                    CAbiClass::Memory { .. } => ptr_t,
-                });
-                param_classes.push(class);
+            for (&pt, &p) in fsig.param_types.iter().zip(&sig.params) {
+                match p {
+                    CParam::Pass if is_by_ref(pt, lctx.ctx) => llvm_params.push(ptr_t),
+                    CParam::Pass => llvm_params.push(lctx.ctx.get_llvm_type(pt)?),
+                    CParam::Skip => {}
+                    CParam::Value(t, class) => {
+                        llvm_params.push(c_param_llvm_ty(t, class, lctx.ctx)?)
+                    }
+                }
             }
-            let llvm_ret = match ret_class {
-                CAbiClass::Memory { .. } => lctx.ctx.context().void_type(),
-                CAbiClass::Coerce { w0, w1 } => coerce_ty(w0, w1),
-                _ if ret_ty.is_none() => lctx.ctx.context().void_type(),
-                _ => lctx.ctx.get_llvm_type(ret_ty)?,
-            };
+            let llvm_ret = c_ret_llvm_ty(ret_ty, sig.ret, lctx.ctx)?;
             let llvm_fn_ty = llvm_ret.fn_type(&llvm_params, false);
 
             let extra = inst.b;
             let arg_count = lctx.jfn.get_extra(extra);
             let mut args = Vec::with_capacity(arg_count as usize + 1);
-            // (LLVM arg index, jam type) of byval args — attributed after
-            // the call is built.
+            // (LLVM arg index, jam type) of byval args, and (LLVM index,
+            // attribute) of integer-extension args: attributed after the call
+            // is built.
             let mut byval_args: Vec<(u32, TypeIdx)> = Vec::new();
+            let mut ext_args: Vec<(u32, &'static str)> = Vec::new();
             if let Some(slot) = sret_slot {
                 args.push(slot);
             }
             for i in 0..arg_count {
                 let ar = lctx.jfn.get_extra(extra + 1 + i);
                 let av = emit_inst(lctx, ar)?.ok_or("CallIndirect arg")?;
-                let (pt, class) = match param_tys.get(i as usize) {
-                    Some(&pt) => (pt, param_classes[i as usize]),
-                    None => {
-                        args.push(av);
-                        continue;
-                    }
-                };
-                // Byref aggregates arrive as pointers in our SSA model.
-                let lowered = match class {
-                    CAbiClass::Direct => av,
-                    CAbiClass::Hfa => {
-                        let agg_ty = lctx.ctx.get_llvm_type(pt)?;
-                        lctx.ctx.builder().load(agg_ty, av, "arg.hfa")
-                    }
-                    CAbiClass::Coerce { w0, w1 } => {
-                        // memcpy into a word-aligned temp so a 12-byte struct
-                        // never over-reads, then load the coerced value.
-                        let ct = coerce_ty(w0, w1);
-                        let size = lctx.ctx.type_size(pt)?;
-                        let align = lctx.ctx.type_align(pt)?;
-                        let tmp = lctx.ctx.builder().alloca(ct, 8, "arg.coerce");
-                        lctx.ctx.builder().memcpy(tmp, 8, av, align, size);
-                        lctx.ctx.builder().load(ct, tmp, "arg.coerce.v")
-                    }
-                    CAbiClass::Memory { byval } => {
-                        // The callee owns the copy: never hand it the
-                        // caller's storage.
-                        let agg_ty = lctx.ctx.get_llvm_type(pt)?;
-                        let size = lctx.ctx.type_size(pt)?;
-                        let align = lctx.ctx.type_align(pt)?;
-                        let copy = lctx.ctx.builder().alloca(agg_ty, align, "arg.mem.copy");
-                        lctx.ctx.builder().memcpy(copy, align, av, align, size);
-                        if byval {
-                            byval_args.push((args.len() as u32, pt));
+                let pt = fsig.param_types.get(i as usize).copied();
+                match (pt, sig.params.get(i as usize)) {
+                    (Some(pt), Some(CParam::Pass)) => {
+                        if let Some(ext) = c_int_ext(pt, lctx.ctx) {
+                            ext_args.push((args.len() as u32, ext));
                         }
-                        copy
+                        args.push(av);
                     }
-                };
-                args.push(lowered);
+                    (_, Some(CParam::Skip)) => {}
+                    (_, Some(&CParam::Value(t, class))) => {
+                        if matches!(class, CAbiClass::Memory { byval: true }) {
+                            byval_args.push((args.len() as u32, t));
+                        }
+                        let lowered = lower_c_arg(lctx, av, t, class)?;
+                        args.push(lowered);
+                    }
+                    _ => args.push(av),
+                }
             }
-            let name = if inst.ty.is_none() || ret_is_memory {
-                ""
-            } else {
-                "call.indirect"
-            };
+            let returns_value = matches!(sig.ret, CParam::Value(_, c) if !matches!(c, CAbiClass::Memory { .. }))
+                || (matches!(sig.ret, CParam::Pass) && !ret_ty.is_none());
+            let name = if returns_value { "call.indirect" } else { "" };
             let result = lctx
                 .ctx
                 .builder()
@@ -927,34 +1699,50 @@ fn emit_inst_impl<'ctx>(
                 let align = lctx.ctx.type_align(pt)?;
                 result.add_call_site_byval(idx, agg_ty, align as u32);
             }
-            match ret_class {
-                CAbiClass::Memory { .. } => {
+            for (idx, ext) in ext_args {
+                result.add_call_site_ext(idx, ext);
+            }
+            // A byref return (aggregate or array) hands its consumer a
+            // pointer to storage holding the value.
+            let agg_slot =
+                |lctx: &mut JirCodegenCtx<'_, 'ctx>, name: &str| -> Result<Value<'ctx>, String> {
                     let agg_ty = lctx.ctx.get_llvm_type(ret_ty)?;
                     let align = lctx.ctx.type_align(ret_ty)?;
+                    Ok(lctx.ctx.builder().alloca(agg_ty, align, name))
+                };
+            match sig.ret {
+                CParam::Value(rt, CAbiClass::Memory { .. }) => {
+                    let agg_ty = lctx.ctx.get_llvm_type(rt)?;
+                    let align = lctx.ctx.type_align(rt)?;
                     result.add_call_site_sret(0, agg_ty, align as u32);
                     Ok(Some(
                         sret_slot.expect("sret slot exists for Memory returns"),
                     ))
                 }
-                CAbiClass::Coerce { w0, w1 } => {
-                    // Spill the coerced words; the byref consumer reads the
-                    // struct's fields through the (word-aligned) pointer.
-                    let ct = coerce_ty(w0, w1);
-                    let slot = lctx.ctx.builder().alloca(ct, 8, "ret.coerce");
+                CParam::Value(rt, CAbiClass::Coerce { w0, w1 }) => {
+                    // Spill the words to a word-sized temp, then copy only
+                    // the value's bytes into its storage.
+                    let ct = c_coerce_ty(lctx.ctx, w0, w1);
+                    let tmp_align = coerce_tmp_align(rt, lctx.ctx)?;
+                    let tmp = lctx.ctx.builder().alloca(ct, tmp_align, "ret.coerce");
+                    lctx.ctx.builder().store(result, tmp);
+                    let slot = agg_slot(lctx, "ret.val")?;
+                    let size = lctx.ctx.type_size(rt)?;
+                    let align = lctx.ctx.type_align(rt)?;
+                    lctx.ctx.builder().memcpy(slot, align, tmp, tmp_align, size);
+                    Ok(Some(slot))
+                }
+                CParam::Value(_, CAbiClass::Hfa | CAbiClass::Direct) => {
+                    let slot = agg_slot(lctx, "ret.byval")?;
                     lctx.ctx.builder().store(result, slot);
                     Ok(Some(slot))
                 }
-                CAbiClass::Hfa => {
-                    let agg_ty = lctx.ctx.get_llvm_type(ret_ty)?;
-                    let align = lctx.ctx.type_align(ret_ty)?;
-                    let slot = lctx.ctx.builder().alloca(agg_ty, align, "ret.byval");
-                    lctx.ctx.builder().store(result, slot);
-                    Ok(Some(slot))
-                }
-                CAbiClass::Direct => Ok(Some(result)),
+                // Zero-sized: nothing came back; the consumer still wants
+                // storage to point at.
+                CParam::Skip => Ok(Some(agg_slot(lctx, "ret.empty")?)),
+                CParam::Pass => Ok(Some(result)),
             }
         }
-
         JirTag::Invalid => Err("jir_codegen: Invalid tag in instruction stream".into()),
     }
 }
@@ -1043,11 +1831,7 @@ fn emit_ret<'ctx>(
     inst: &JirInst,
 ) -> Result<Option<Value<'ctx>>, String> {
     if jir_return_is_sret(lctx.jfn, lctx.ctx) {
-        let f = lctx
-            .ctx
-            .module()
-            .get_function(&lctx.jfn.name)
-            .ok_or("Ret: function missing")?;
+        let f = body_fn(lctx.ctx, &lctx.jfn.name).ok_or("Ret: function missing")?;
         let sret_slot = f.param(0);
         if inst.a != NO_JIR_REF {
             let vty = lctx.jfn.get_inst(inst.a).ty;
@@ -1132,9 +1916,7 @@ pub fn jir_define_body<'ctx>(jfn: &JirFunction, ctx: &CodegenContext<'ctx>) -> R
     if jfn.is_extern {
         return Ok(());
     }
-    let f = ctx
-        .module()
-        .get_function(&jfn.name)
+    let f = body_fn(ctx, &jfn.name)
         .ok_or_else(|| format!("jir_define_body: prototype missing for `{}`", jfn.name))?;
 
     let mut lctx = JirCodegenCtx {
@@ -1170,6 +1952,10 @@ pub fn jir_define_body<'ctx>(jfn: &JirFunction, ctx: &CodegenContext<'ctx>) -> R
                 lctx.value_map.insert(r, val);
             }
         }
+    }
+    let wrapped = format!("{}{EXPORT_BODY_SUFFIX}", jfn.name);
+    if jfn.is_export && ctx.module().get_function(&wrapped).is_some() {
+        emit_export_wrapper(jfn, ctx)?;
     }
     Ok(())
 }
@@ -1226,6 +2012,97 @@ mod tests {
         // extern -> external linkage; a bodyless external declaration verifies.
         assert!(f.verify());
         assert_eq!(f.count_params(), 1);
+    }
+
+    /// Register a struct of `n` i64 fields named `name`; returns its type.
+    fn i64_struct<'c>(ctx: &'c Context, cg: &CodegenContext<'c>, name: &str, n: usize) -> TypeIdx {
+        let nid = cg.string_pool.intern(name.as_bytes());
+        let ty = cg.type_pool.intern_struct(nid);
+        let fields = (0..n).map(|i| (format!("f{i}"), builtin::I64)).collect();
+        cg.register_struct(name, ctx.named_struct(name), fields);
+        ty
+    }
+
+    #[test]
+    fn scalar_extern_keeps_plain_lowering() {
+        let ctx = Context::new();
+        let cg = CodegenContext::new(&ctx, "m");
+        let mut jfn = JirFunction::new();
+        jfn.name = "putchar".into();
+        jfn.param_types = vec![builtin::I32];
+        jfn.return_type = builtin::I32;
+        jfn.is_extern = true;
+        let f = jir_declare_prototype(&jfn, &cg).unwrap();
+        assert!(!f.has_marker_attr(C_ABI_ATTR));
+    }
+
+    #[test]
+    fn extern_memory_class_return_is_sret() {
+        // extern fn mk() Big  (32 bytes): C returns it through an sret slot.
+        let ctx = Context::new();
+        let cg = CodegenContext::new(&ctx, "m");
+        let big = i64_struct(&ctx, &cg, "Big", 4);
+        let mut jfn = JirFunction::new();
+        jfn.name = "mk".into();
+        jfn.return_type = big;
+        jfn.is_extern = true;
+        let f = jir_declare_prototype(&jfn, &cg).unwrap();
+        assert!(f.has_marker_attr(C_ABI_ATTR));
+        assert!(f.uses_sret(), "sret attribute routes the slot to x8 / rdi");
+        assert_eq!(f.count_params(), 1);
+        assert!(f.return_type().is_void());
+        assert!(f.verify());
+    }
+
+    #[test]
+    fn extern_two_word_struct_arg_matches_clang() {
+        // extern fn sum(l: L2) i64: clang passes L2 as `[2 x i64]` on
+        // AArch64 (consecutive x registers or all on the stack) and as an
+        // eightbyte pair on x86-64.
+        let ctx = Context::new();
+        let cg = CodegenContext::new(&ctx, "m");
+        let l2 = i64_struct(&ctx, &cg, "L2", 2);
+        let mut jfn = JirFunction::new();
+        jfn.name = "sum".into();
+        jfn.param_types = vec![l2];
+        jfn.return_type = builtin::I64;
+        jfn.is_extern = true;
+        let f = jir_declare_prototype(&jfn, &cg).unwrap();
+        assert_eq!(f.count_params(), 1);
+        let pt = f.param(0).type_of();
+        if cg.target_arch() == crate::target::Arch::X86_64 {
+            assert!(pt.is_struct());
+        } else {
+            assert!(
+                pt.is_array(),
+                "AArch64 two-word aggregate must be [2 x i64]"
+            );
+        }
+        let sig = cg.c_sig("sum").expect("signature recorded");
+        assert!(matches!(sig.params[0], CParam::Value(t, _) if t == l2));
+    }
+
+    #[test]
+    fn export_with_struct_gets_c_wrapper_over_jam_body() {
+        // export fn mkPair(a: i64) Pair: the exported symbol is the C-ABI
+        // wrapper; the Jam-ABI body lives under the suffixed name.
+        let ctx = Context::new();
+        let cg = CodegenContext::new(&ctx, "m");
+        let pair = i64_struct(&ctx, &cg, "Pair", 2);
+        let mut jfn = JirFunction::new();
+        jfn.name = "mkPair".into();
+        jfn.param_types = vec![builtin::I64];
+        jfn.return_type = pair;
+        jfn.is_export = true;
+        let body = jir_declare_prototype(&jfn, &cg).unwrap();
+        let wrapper = cg.module().get_function("mkPair").expect("wrapper");
+        assert!(wrapper.has_marker_attr(C_ABI_ATTR));
+        assert!(!wrapper.uses_sret(), "16 bytes return in registers under C");
+        let body_name = format!("mkPair{EXPORT_BODY_SUFFIX}");
+        assert!(cg.module().get_function(&body_name).is_some());
+        assert!(!body.has_marker_attr(C_ABI_ATTR));
+        assert!(body.uses_sret(), "the body keeps Jam's sret return");
+        assert_eq!(llvm_body_name(&jfn, &cg), body_name);
     }
 
     #[test]
