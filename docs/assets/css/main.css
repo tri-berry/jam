@@ -12,6 +12,10 @@
     --accent: #8cc7d9;
     --accent-bg: rgba(140, 199, 217, 0.14);
     --sidebar-w: 21rem;
+    /* Content column + gap + sidebar. On wider windows the pair is
+       centred and --gutter is the space left on each side. */
+    --shell-w: 100rem;
+    --gutter: max(0px, (100vw - var(--shell-w)) / 2);
     --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
 }
 
@@ -50,7 +54,7 @@ code, pre, kbd { font-family: var(--mono); }
     position: fixed;
     top: 0;
     bottom: 0;
-    right: 0;
+    right: var(--gutter);
     width: var(--sidebar-w);
     padding: 3rem 3.5rem 2rem 2rem;
     overflow-y: auto;
@@ -169,7 +173,7 @@ code, pre, kbd { font-family: var(--mono); }
 /* ------------------------------------------------------------------ */
 
 .content {
-    margin: 0 calc(var(--sidebar-w) + 3rem) 0 auto;
+    margin: 0 calc(var(--sidebar-w) + 3rem + var(--gutter)) 0 auto;
     max-width: 76rem;
     padding: 4.5rem 0 6rem clamp(2rem, 6vw, 7rem);
 }
@@ -522,6 +526,7 @@ code, pre, kbd { font-family: var(--mono); }
 
     .sidebar {
         top: 4.1rem;
+        right: 0;
         z-index: 10;
         width: 100%;
         padding: 1.5rem 1rem 2rem;
