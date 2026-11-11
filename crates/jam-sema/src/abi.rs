@@ -158,18 +158,50 @@ pub enum CAbiClass {
         w0: CWord,
         w1: Option<CWord>,
     },
-    /// > 16 bytes. Args: caller copy — a plain pointer on aarch64,
-    /// byval on x86-64. Returns: sret on both.
+    /// Over 16 bytes (Win64: not 1/2/4/8 bytes). Args: caller copy — a plain
+    /// pointer on aarch64 and Win64, byval on x86-64 SysV. Returns: sret.
     Memory {
         byval: bool,
     },
 }
 
+/// The concrete type the C ABI classifies: a generic instance (`Pt(f64)`)
+/// or a deferred-length array (`[N]f64`) resolved, and a bare name qualified
+/// in the current module. Without this the walkers saw a `GenericCall` /
+/// `ArrayExpr` they don't know and classified the value as integers.
+pub(crate) fn abi_concrete(ty: TypeIdx, ctx: &CodegenContext) -> TypeIdx {
+    let ty = ctx.requalify_type(ty, &ctx.current_body_module());
+    match ctx.type_pool.get(ty).kind {
+        TypeKind::GenericCall => {
+            let r = ctx.resolve_generic_call(ty);
+            if r.is_none() { ty } else { r }
+        }
+        TypeKind::ArrayExpr => {
+            let r = ctx.resolve_array_expr(ty);
+            if r.is_none() { ty } else { r }
+        }
+        _ => ty,
+    }
+}
+
 pub fn classify_c_abi(ty: TypeIdx, ctx: &CodegenContext) -> Result<CAbiClass, String> {
+    let ty = abi_concrete(ty, ctx);
     if !is_by_ref(ty, ctx) {
         return Ok(CAbiClass::Direct);
     }
     match ctx.target_arch() {
+        // Win64: aggregates of 1, 2, 4 or 8 bytes travel as one integer
+        // register; anything else is passed as a pointer to a caller-made
+        // copy (no byval) and returned through sret.
+        crate::target::Arch::X86_64 if ctx.target_os() == crate::target::Os::Windows => {
+            match ctx.type_size(ty)? {
+                1 | 2 | 4 | 8 => Ok(CAbiClass::Coerce {
+                    w0: CWord::Int,
+                    w1: None,
+                }),
+                _ => Ok(CAbiClass::Memory { byval: false }),
+            }
+        }
         crate::target::Arch::X86_64 => {
             let size = ctx.type_size(ty)?;
             if size <= 16 {
@@ -186,10 +218,10 @@ pub fn classify_c_abi(ty: TypeIdx, ctx: &CodegenContext) -> Result<CAbiClass, St
         }
         // AArch64 rules for everything else — the only other arch today.
         _ => {
-            if let Some((_bits, leaves)) = c_abi_float_leaves(ty, ctx) {
-                if (1..=4).contains(&leaves) {
-                    return Ok(CAbiClass::Hfa);
-                }
+            if let Some((_bits, leaves)) = c_abi_float_leaves(ty, ctx)
+                && (1..=4).contains(&leaves)
+            {
+                return Ok(CAbiClass::Hfa);
             }
             let size = ctx.type_size(ty)?;
             if size <= 16 {
@@ -201,11 +233,84 @@ pub fn classify_c_abi(ty: TypeIdx, ctx: &CodegenContext) -> Result<CAbiClass, St
     }
 }
 
+/// How one parameter (or the return) of a C-ABI prototype crosses the
+/// boundary. Computed once per prototype and shared by its declaration, its
+/// call sites and an export's wrapper, so they cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CParam {
+    /// The Jam value passes unchanged: scalars, and pointers (`mut` params,
+    /// arrays decaying as in C).
+    Pass,
+    /// A zero-sized aggregate: C has no argument (or return value) for it.
+    Skip,
+    /// A by-value aggregate of `ty` (resolved in the declaring module),
+    /// lowered as `class`.
+    Value(TypeIdx, CAbiClass),
+}
+
+/// The C lowering of a whole prototype.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CSig {
+    pub ret: CParam,
+    pub params: Vec<CParam>,
+}
+
+/// x86-64 SysV register budget (clang `X86_64ABIInfo::computeInfo`): an
+/// aggregate whose eightbytes no longer fit in the remaining GPRs / SSE
+/// registers is passed wholly in memory (byval), never split between the
+/// last register and the stack. `scalars[i]` is the `(GPRs, SSE regs)` param
+/// `i` takes when it is `CParam::Pass`.
+pub fn sysv_demote(params: &mut [CParam], scalars: &[(u32, u32)], sret: bool) {
+    let mut gpr: u32 = if sret { 5 } else { 6 };
+    let mut sse: u32 = 8;
+    for (p, &(g, x)) in params.iter_mut().zip(scalars) {
+        match *p {
+            CParam::Pass => {
+                gpr = gpr.saturating_sub(g);
+                sse = sse.saturating_sub(x);
+            }
+            CParam::Value(ty, CAbiClass::Coerce { w0, w1 }) => {
+                let words = [Some(w0), w1];
+                let need_int = words.iter().filter(|w| **w == Some(CWord::Int)).count() as u32;
+                let need_sse = words.iter().filter(|w| **w == Some(CWord::Fp)).count() as u32;
+                if need_int <= gpr && need_sse <= sse {
+                    gpr -= need_int;
+                    sse -= need_sse;
+                } else {
+                    *p = CParam::Value(ty, CAbiClass::Memory { byval: true });
+                }
+            }
+            CParam::Value(..) | CParam::Skip => {}
+        }
+    }
+}
+
 /// Walk an aggregate's leaf fields; `Some((bits, count))` when every leaf is
-/// a float of one width — the homogeneous-float-aggregate shape AAPCS64
-/// carries in FP registers. `None` for any other composition (unions
-/// included: no dominant member to classify by).
-fn c_abi_float_leaves(ty: TypeIdx, ctx: &CodegenContext) -> Option<(u32, u32)> {
+/// a float of one width, the homogeneous-float-aggregate shape AAPCS64
+/// carries in FP registers. A union is homogeneous when every member is,
+/// with one float width (its count is the largest member's). `None` for any
+/// other composition.
+pub fn c_abi_float_leaves(ty: TypeIdx, ctx: &CodegenContext) -> Option<(u32, u32)> {
+    let ty = abi_concrete(ty, ctx);
+    // A union is homogeneous when every member is, with one float width;
+    // its count is the largest member's (AAPCS64 5.9.5.1, as clang does).
+    if ctx.is_union_registered(ty) {
+        let mut bits = 0u32;
+        let mut count = 0u32;
+        for (_, fty) in ctx.union_fields(ty)? {
+            let (fbits, fcount) = c_abi_float_leaves(fty, ctx)?;
+            if bits != 0 && bits != fbits {
+                return None;
+            }
+            bits = fbits;
+            count = count.max(fcount);
+        }
+        return if count == 0 {
+            None
+        } else {
+            Some((bits, count))
+        };
+    }
     let k = ctx.type_pool.get(ty);
     match k.kind {
         TypeKind::Float => Some((k.a, 1)),
@@ -267,7 +372,7 @@ fn sysv_walk(
     base: u64,
     w: &mut [Option<CWord>; 2],
 ) -> Result<(), String> {
-    let ty = ctx.requalify_type(ty, &ctx.current_body_module());
+    let ty = abi_concrete(ty, ctx);
     let k = ctx.type_pool.get(ty);
     let align_up = |off: u64, a: u64| -> u64 { if a == 0 { off } else { off.div_ceil(a) * a } };
     match k.kind {
