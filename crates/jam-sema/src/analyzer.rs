@@ -207,6 +207,10 @@ impl<'c, 'ctx> Analyzer<'c, 'ctx> {
     /// (ptr/slice/array) — pointer fields don't make the aggregate
     /// size-dependent on itself, so they skip the cycle check.
     fn direct_named_type(&self, ty: TypeIdx) -> Option<String> {
+        // A module's bare `E` is `mod.E` in the registry: unqualified, it
+        // read as no known type, so a by-value cycle through an imported
+        // module's types went undiagnosed (and overflowed the stack later).
+        let ty = self.ctx.requalify_type(ty, &self.ctx.current_body_module());
         let k = self.ctx.type_pool.get(ty);
         if matches!(
             k.kind,
