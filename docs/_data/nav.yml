@@ -3,63 +3,70 @@
       url: /
     - name: Installation
       url: /installation/
-    - name: Language Reference
-      url: /reference/
-- title: Basics
+- title: Language Reference
+  url: /reference/
   items:
-    - name: Variables & Constants
-      url: /reference/#variables
-    - name: Integer Types
-      url: /reference/#types
-    - name: Booleans
-      url: /reference/#bool
-    - name: Strings
-      url: /reference/#strings
-    - name: Pointers & Slices
-      url: /reference/#pointers
-    - name: Arrays
-      url: /reference/#arrays
-- title: Control & Functions
-  items:
-    - name: Control Flow
-      url: /reference/#control-flow
-    - name: Functions
-      url: /reference/#fn-declaration
-    - name: Type Casts
-      url: /reference/#casts
-    - name: Function Pointers
-      url: /reference/#fn-pointers
-- title: Types
-  items:
-    - name: Structs
-      url: /reference/#structs
-    - name: Enums
-      url: /reference/#enums
-    - name: Unions
-      url: /reference/#unions
-    - name: Pattern Matching
-      url: /reference/#match
-    - name: Generics
-      url: /reference/#generics
-- title: System
-  items:
-    - name: Compile-Time Execution
-      url: /reference/#comptime
-    - name: Testing
-      url: /reference/#testing
-    - name: Modules & Imports
-      url: /reference/#imports
-    - name: Comptime Intrinsics
-      url: /reference/#intrinsics
-    - name: extern / FFI
-      url: /reference/#extern
-- title: Mutable Value Semantics
-  items:
-    - name: Overview
-      url: /reference/#mvs-overview
-    - name: Parameter Modes
-      url: /reference/#mvs-modes
-    - name: Exclusivity
-      url: /reference/#mvs-exclusivity
-    - name: Drop
-      url: /reference/#mvs-drop
+    - name: "Basics"
+      url: /reference/basics/
+      sections:
+        - name: "Variables & Constants"
+          id: variables
+        - name: "Integer Types"
+          id: types
+        - name: "Booleans"
+          id: bool
+        - name: "Strings"
+          id: strings
+        - name: "Pointers & Slices"
+          id: pointers
+        - name: "Arrays"
+          id: arrays
+    - name: "Control Flow & Functions"
+      url: /reference/control-flow-functions/
+      sections:
+        - name: "Control Flow"
+          id: control-flow
+        - name: "Functions"
+          id: fn-declaration
+        - name: "Function Pointers"
+          id: fn-pointers
+        - name: "Type Casts"
+          id: casts
+    - name: "Data Types"
+      url: /reference/data-types/
+      sections:
+        - name: "Structs"
+          id: structs
+        - name: "Enums"
+          id: enums
+        - name: "Unions"
+          id: unions
+        - name: "Pattern Matching"
+          id: match
+        - name: "Generics"
+          id: generics
+    - name: "Mutable Value Semantics"
+      url: /reference/value-semantics/
+      sections:
+        - name: "Parameter Modes"
+          id: mvs-modes
+        - name: "Exclusivity"
+          id: mvs-exclusivity
+        - name: "Drop"
+          id: mvs-drop
+    - name: "Compile Time"
+      url: /reference/compile-time/
+      sections:
+        - name: "Compile-Time Execution"
+          id: comptime
+        - name: "Comptime Intrinsics"
+          id: intrinsics
+    - name: "Modules, Testing & FFI"
+      url: /reference/modules/
+      sections:
+        - name: "Modules & Imports"
+          id: imports
+        - name: "Testing"
+          id: testing
+        - name: "extern / FFI"
+          id: extern

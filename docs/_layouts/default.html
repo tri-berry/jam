@@ -49,15 +49,25 @@
         // follows the first match, Escape clears.
         (function () {
             const input = document.getElementById('search');
+            const sidebar = document.getElementById('sidebar');
             const groups = document.querySelectorAll('.nav-group');
             const topbar = document.querySelector('.topbar');
+            function matches(el, q) { return el.textContent.toLowerCase().includes(q); }
+            // While searching, every page's sections are searchable, not
+            // just the current page's.
             function filter() {
                 const q = input.value.trim().toLowerCase();
+                sidebar.classList.toggle('searching', q !== '');
                 groups.forEach(function (group) {
                     let any = false;
-                    group.querySelectorAll('li').forEach(function (li) {
-                        const hit = !q || li.textContent.toLowerCase().includes(q);
-                        li.hidden = !hit;
+                    group.querySelectorAll('.nav-page').forEach(function (page) {
+                        let hit = !q || matches(page.querySelector('a'), q);
+                        page.querySelectorAll('.nav-tree li').forEach(function (li) {
+                            const sub = !q || matches(li, q);
+                            li.hidden = !sub;
+                            hit = hit || sub;
+                        });
+                        page.hidden = !hit;
                         any = any || hit;
                     });
                     group.hidden = !any;
@@ -66,7 +76,10 @@
             input.addEventListener('input', filter);
             input.addEventListener('keydown', function (e) {
                 if (e.key === 'Enter') {
-                    const first = document.querySelector('.sidebar-nav li:not([hidden]) a');
+                    const q = input.value.trim().toLowerCase();
+                    const first = Array.from(document.querySelectorAll('.sidebar-nav li a')).find(function (a) {
+                        return !a.closest('li[hidden]') && (!q || matches(a, q));
+                    });
                     if (first) first.click();
                 } else if (e.key === 'Escape') {
                     input.value = '';
@@ -84,27 +97,47 @@
             });
         })();
 
-        // Highlight the section currently in view.
+        // Highlight the section currently in view, and fill the rail
+        // beside the section list down to it.
         (function () {
             const links = {};
-            document.querySelectorAll('.sidebar-nav a').forEach(function (a) {
+            document.querySelectorAll('.sidebar-nav .nav-tree a').forEach(function (a) {
                 const url = new URL(a.href);
                 if (url.pathname === location.pathname && url.hash) links[url.hash.slice(1)] = a;
             });
             const headings = Array.from(document.querySelectorAll('.content h2[id]')).filter(function (h) { return links[h.id]; });
             if (!headings.length) return;
-            let current = null;
+            const tree = links[headings[0].id].closest('.nav-tree');
+            let current;
+            function paint() {
+                const li = current ? links[current].closest('li') : null;
+                let passed = li !== null;
+                Array.from(tree.children).forEach(function (item) {
+                    if (item === li) passed = false;
+                    item.classList.toggle('read', passed);
+                });
+                tree.style.setProperty('--level', (li ? li.offsetTop + li.offsetHeight : 0) + 'px');
+            }
             function update() {
                 let id = null;
                 for (const h of headings) {
                     if (h.getBoundingClientRect().top < 140) id = h.id; else break;
                 }
+                // At the very bottom the last section may be too short to
+                // reach the top of the window; count it as reached.
+                const doc = document.documentElement;
+                if (doc.scrollHeight > window.innerHeight && window.innerHeight + window.scrollY >= doc.scrollHeight - 2) {
+                    id = headings[headings.length - 1].id;
+                }
                 if (id === current) return;
                 if (current) links[current].classList.remove('active');
                 if (id) links[id].classList.add('active');
                 current = id;
+                paint();
             }
             document.addEventListener('scroll', update, { passive: true });
+            window.addEventListener('resize', paint);
+            document.getElementById('search').addEventListener('input', paint);
             update();
         })();
     </script>

@@ -127,6 +127,42 @@ code, pre, kbd { font-family: var(--mono); }
 }
 .nav-group a:hover,
 .nav-group a.active { color: #fff; }
+.nav-group h5 a { color: inherit; }
+
+/* Sections of a page, listed beside a rail that fills with jar blue as
+   you read down the page (the scroll script sets --level). Shown only
+   for the page you are on. */
+.nav-group .nav-tree {
+    display: none;
+    position: relative;
+    margin: 0.5rem 0 0.7rem 0.15rem;
+    padding-left: 1.1rem;
+}
+.nav-page.is-current > .nav-tree,
+.searching .nav-tree { display: block; }
+.nav-tree::before,
+.nav-tree::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    border-radius: 3px;
+}
+.nav-tree::before { bottom: 0; background: var(--border); }
+.nav-tree::after {
+    height: var(--level, 0px);
+    background: var(--accent);
+    transition: height 0.15s ease;
+}
+.nav-group .nav-tree li { margin: 0; padding: 0.2rem 0; }
+.nav-group .nav-tree a { color: var(--text-muted); }
+.nav-group .nav-tree .read a { color: var(--text-body); }
+.nav-group .nav-tree a:hover,
+.nav-group .nav-tree a.active { color: #fff; }
+@media (prefers-reduced-motion: reduce) {
+    .nav-tree::after { transition: none; }
+}
 
 .sidebar-foot {
     display: flex;
