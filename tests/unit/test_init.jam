@@ -71,7 +71,7 @@ fn arrayReassign() u8 {
 fn forLoopFill() u8 {
     var arr: [16]u8 = [0; 16];
     for i in 0:16 {
-        arr[i] = i;
+        arr[i] = i as u8;
     }
     return arr[7];
 }

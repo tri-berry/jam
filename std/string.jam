@@ -128,7 +128,7 @@ pub fn trim(s: []u8) []u8 {
 
 // `a` followed by `b`, in fresh heap storage (drop the Vec when done).
 pub fn concat(a: []u8, b: []u8) Vec(u8) {
-    var out: Vec(u8) = Vec(u8).withCapacity(a.len + b.len);
+    var out: Vec(u8) = Vec(u8).withCapacity((a.len + b.len) as u32);
     out.appendSlice(a);
     out.appendSlice(b);
     return out;
