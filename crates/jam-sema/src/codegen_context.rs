@@ -467,7 +467,9 @@ impl<'ctx> CodegenContext<'ctx> {
         else {
             return ComptimeValue::None;
         };
-        self.destructured_in_progress.borrow_mut().insert(key.clone());
+        self.destructured_in_progress
+            .borrow_mut()
+            .insert(key.clone());
         let outer_taint = self.destructured_tainted.replace(false);
         self.push_const_scope(src.to_string());
         let v = self.fold_comptime_expr(init);
@@ -1535,7 +1537,6 @@ impl<'ctx> CodegenContext<'ctx> {
             .insert(type_name.into(), mangled_symbol.into());
     }
 
-
     /// The mangled drop-fn symbol for the type `ty` names (Struct/Named/Enum),
     /// or `None` when it has no registered drop. Resolves through `name_for_kinds`
     /// so an instantiated generic / type-alias (`CounterI32` -> `Counter__i32`)
@@ -1789,8 +1790,8 @@ impl<'ctx> CodegenContext<'ctx> {
         // frame (resolving a substitution result pushes an empty one); an
         // outer instance's arguments don't count. The type may sit inside an
         // argument (`[2]A`, `*A`, `Vec(A)`), not just be one.
-        let in_generic_body = ctx_module == self.current_body_module()
-            && self.const_lookup_module() != ctx_module;
+        let in_generic_body =
+            ctx_module == self.current_body_module() && self.const_lookup_module() != ctx_module;
         let is_type_argument = || {
             self.current_subst
                 .borrow()

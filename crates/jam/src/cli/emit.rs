@@ -872,117 +872,117 @@ fn check_c_symbol_agreement(
             _ => true,
         }
     }
-        // How a value crosses the boundary: a scalar by its type, an
-        // aggregate by size, alignment and C ABI class (two modules' own
-        // same-layout `Q`s agree; differently laid out ones don't).
-        #[derive(PartialEq)]
-        enum Crossing {
-            Scalar(TypeIdx),
-            // An integer (also a unit enum's tag) by width and signedness.
-            Int(u32, bool),
-            // A slice is `{ptr, len}`, whatever its element type.
-            Slice,
-            // Any pointer (also a `mut` param, or a slice's data) is one
-            // address word, whatever it points at.
-            Pointer,
-            Aggregate(u64, u64, Option<jam_sema::abi::CAbiClass>),
-        }
-        type Sig = (Vec<Crossing>, Crossing, bool);
-        let mut seen: std::collections::HashMap<String, (Sig, String)> =
-            std::collections::HashMap::new();
-        for (i, m) in all_modules.iter().enumerate() {
-            let id = module_ids[i].clone();
-            cg.push_body_module(id.clone());
-            // Externs and exports alike: an export defines the symbol a
-            // same-named extern elsewhere declares.
-            for func in m.functions.iter().filter(|f| f.is_extern || f.is_export) {
-                // Early: a signature naming a generic instance that doesn't
-                // exist yet waits for the late run (classifying it here
-                // would instantiate it before the functions its methods
-                // call are declared).
-                if early
-                    && func
-                        .args
-                        .iter()
-                        .map(|p| p.ty)
-                        .chain(std::iter::once(func.return_type))
-                        .any(|t| !instance_exists(cg, cg.requalify_type(t, &id)))
-                {
-                    continue;
-                }
-                let crossing = |t: TypeIdx| -> Crossing {
-                    let t = cg.requalify_type(t, &id);
-                    if !t.is_none()
-                        && matches!(
-                            cg.type_pool.get(t).kind,
-                            TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Fn
-                        )
-                    {
-                        return Crossing::Pointer;
-                    }
-                    if !t.is_none() {
-                        let k = cg.type_pool.get(t);
-                        if k.kind == TypeKind::Int {
-                            return Crossing::Int(k.a, k.b != 0);
-                        }
-                        if k.kind == TypeKind::Slice {
-                            return Crossing::Slice;
-                        }
-                        if cg.enum_name_of(t).is_some() && !jam_sema::abi::is_by_ref(t, cg) {
-                            return Crossing::Int(8, false);
-                        }
-                    }
-                    if t.is_none() || !jam_sema::abi::is_by_ref(t, cg) {
-                        return Crossing::Scalar(t);
-                    }
-                    Crossing::Aggregate(
-                        cg.type_size(t).unwrap_or(0),
-                        cg.type_align(t).unwrap_or(0),
-                        jam_sema::abi::classify_c_abi(t, cg).ok(),
+    // How a value crosses the boundary: a scalar by its type, an
+    // aggregate by size, alignment and C ABI class (two modules' own
+    // same-layout `Q`s agree; differently laid out ones don't).
+    #[derive(PartialEq)]
+    enum Crossing {
+        Scalar(TypeIdx),
+        // An integer (also a unit enum's tag) by width and signedness.
+        Int(u32, bool),
+        // A slice is `{ptr, len}`, whatever its element type.
+        Slice,
+        // Any pointer (also a `mut` param, or a slice's data) is one
+        // address word, whatever it points at.
+        Pointer,
+        Aggregate(u64, u64, Option<jam_sema::abi::CAbiClass>),
+    }
+    type Sig = (Vec<Crossing>, Crossing, bool);
+    let mut seen: std::collections::HashMap<String, (Sig, String)> =
+        std::collections::HashMap::new();
+    for (i, m) in all_modules.iter().enumerate() {
+        let id = module_ids[i].clone();
+        cg.push_body_module(id.clone());
+        // Externs and exports alike: an export defines the symbol a
+        // same-named extern elsewhere declares.
+        for func in m.functions.iter().filter(|f| f.is_extern || f.is_export) {
+            // Early: a signature naming a generic instance that doesn't
+            // exist yet waits for the late run (classifying it here
+            // would instantiate it before the functions its methods
+            // call are declared).
+            if early
+                && func
+                    .args
+                    .iter()
+                    .map(|p| p.ty)
+                    .chain(std::iter::once(func.return_type))
+                    .any(|t| !instance_exists(cg, cg.requalify_type(t, &id)))
+            {
+                continue;
+            }
+            let crossing = |t: TypeIdx| -> Crossing {
+                let t = cg.requalify_type(t, &id);
+                if !t.is_none()
+                    && matches!(
+                        cg.type_pool.get(t).kind,
+                        TypeKind::PtrSingle | TypeKind::PtrMany | TypeKind::Fn
                     )
-                };
-                let sig = (
-                    func.args
-                        .iter()
-                        .map(|p| {
-                            if p.mode == jam_core::param_mode::ParamMode::Mut {
-                                Crossing::Pointer
-                            } else {
-                                crossing(p.ty)
-                            }
-                        })
-                        .collect::<Vec<_>>(),
-                    crossing(func.return_type),
-                    func.is_var_args,
-                );
-                let shown = |m: &str| {
-                    if m.is_empty() {
-                        "the entry module".to_string()
-                    } else {
-                        format!("module `{m}`")
+                {
+                    return Crossing::Pointer;
+                }
+                if !t.is_none() {
+                    let k = cg.type_pool.get(t);
+                    if k.kind == TypeKind::Int {
+                        return Crossing::Int(k.a, k.b != 0);
                     }
-                };
-                match seen.get(&func.name) {
-                    Some((prev, prev_mod)) if *prev != sig => {
-                        cg.push_error(
-                            jam_core::diag::SrcLoc::none(),
-                            format!(
-                                "extern `{}` is declared twice with different signatures \
+                    if k.kind == TypeKind::Slice {
+                        return Crossing::Slice;
+                    }
+                    if cg.enum_name_of(t).is_some() && !jam_sema::abi::is_by_ref(t, cg) {
+                        return Crossing::Int(8, false);
+                    }
+                }
+                if t.is_none() || !jam_sema::abi::is_by_ref(t, cg) {
+                    return Crossing::Scalar(t);
+                }
+                Crossing::Aggregate(
+                    cg.type_size(t).unwrap_or(0),
+                    cg.type_align(t).unwrap_or(0),
+                    jam_sema::abi::classify_c_abi(t, cg).ok(),
+                )
+            };
+            let sig = (
+                func.args
+                    .iter()
+                    .map(|p| {
+                        if p.mode == jam_core::param_mode::ParamMode::Mut {
+                            Crossing::Pointer
+                        } else {
+                            crossing(p.ty)
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+                crossing(func.return_type),
+                func.is_var_args,
+            );
+            let shown = |m: &str| {
+                if m.is_empty() {
+                    "the entry module".to_string()
+                } else {
+                    format!("module `{m}`")
+                }
+            };
+            match seen.get(&func.name) {
+                Some((prev, prev_mod)) if *prev != sig => {
+                    cg.push_error(
+                        jam_core::diag::SrcLoc::none(),
+                        format!(
+                            "extern `{}` is declared twice with different signatures \
                                  ({} and {}); every declaration of a C symbol must agree",
-                                func.name,
-                                shown(prev_mod),
-                                shown(&id)
-                            ),
-                        );
-                    }
-                    Some(_) => {}
-                    None => {
-                        seen.insert(func.name.clone(), (sig, id.clone()));
-                    }
+                            func.name,
+                            shown(prev_mod),
+                            shown(&id)
+                        ),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(func.name.clone(), (sig, id.clone()));
                 }
             }
-            cg.pop_body_module();
         }
+        cg.pop_body_module();
+    }
 }
 
 /// Qualify a type/method name with its owning module: bare for the entry
@@ -1672,7 +1672,6 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
             register_const_keyed(&cg, c, info);
         }
     }
-
 
     // Destructuring-import type aliases: `const { Token } = import("m")` brings
     // the type into scope under its bare name; resolve it to `m.Token`. Build a
@@ -2620,21 +2619,26 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
     // `file:line: error: message`.
     if !matches!(mode, EmitMode::Jir) {
         let mut diags = Diagnostics::new();
-        let mut run_analysis_in = |cg: &CodegenContext, f: &FunctionAST, file: &str, module: &str| {
-            if f.is_extern {
-                return;
-            }
-            // Resolve body-level type references against the function's own
-            // module while analysis runs (an export's module_path is empty:
-            // its declaring module's).
-            let m = if f.module_path.is_empty() { module } else { &f.module_path };
-            cg.push_body_module(m.to_string());
-            let found = jam_sema::init_analysis::analyze(f, cg);
-            cg.pop_body_module();
-            for d in found {
-                diags.error(jam_core::diag::SrcLoc::new(file, d.line), d.message);
-            }
-        };
+        let mut run_analysis_in =
+            |cg: &CodegenContext, f: &FunctionAST, file: &str, module: &str| {
+                if f.is_extern {
+                    return;
+                }
+                // Resolve body-level type references against the function's own
+                // module while analysis runs (an export's module_path is empty:
+                // its declaring module's).
+                let m = if f.module_path.is_empty() {
+                    module
+                } else {
+                    &f.module_path
+                };
+                cg.push_body_module(m.to_string());
+                let found = jam_sema::init_analysis::analyze(f, cg);
+                cg.pop_body_module();
+                for d in found {
+                    diags.error(jam_core::diag::SrcLoc::new(file, d.line), d.message);
+                }
+            };
         // Entry module: every non-generic function, with the same test-mode
         // selection as lowering (skip `tfn`s when not testing; skip the user's
         // `main` when testing). Then every struct method.
@@ -2742,7 +2746,10 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
                     if withdrawn.contains(&name) || reported.contains(&name) {
                         continue;
                     }
-                    let Some(callee) = f.direct_callees().into_iter().find(|c| withdrawn.contains(c))
+                    let Some(callee) = f
+                        .direct_callees()
+                        .into_iter()
+                        .find(|c| withdrawn.contains(c))
                     else {
                         continue;
                     };

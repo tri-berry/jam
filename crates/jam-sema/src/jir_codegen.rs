@@ -521,17 +521,31 @@ fn lower_c_vararg<'ctx>(
         let k = lctx.ctx.type_pool.get(t);
         let b = lctx.ctx.builder();
         if k.kind == TypeKind::Float && k.a == 32 {
-            return Ok(Some(b.fp_cast(av, lctx.ctx.context().f64_type(), "vararg.fpext")));
+            return Ok(Some(b.fp_cast(
+                av,
+                lctx.ctx.context().f64_type(),
+                "vararg.fpext",
+            )));
         }
         if t == builtin::BOOL || (k.kind == TypeKind::Int && k.a < 32) {
             let signed = t != builtin::BOOL && k.b != 0;
-            return Ok(Some(b.int_cast(av, lctx.ctx.context().i32_type(), signed, "vararg.ext")));
+            return Ok(Some(b.int_cast(
+                av,
+                lctx.ctx.context().i32_type(),
+                signed,
+                "vararg.ext",
+            )));
         }
         // A unit-only enum is its `u8` tag: promoted like an unsigned char.
         if let Some(en) = lctx.ctx.enum_name_of(t)
             && !lctx.ctx.enum_has_payload_by_name(&en).unwrap_or(true)
         {
-            return Ok(Some(b.int_cast(av, lctx.ctx.context().i32_type(), false, "vararg.ext")));
+            return Ok(Some(b.int_cast(
+                av,
+                lctx.ctx.context().i32_type(),
+                false,
+                "vararg.ext",
+            )));
         }
         return Ok(Some(av));
     }

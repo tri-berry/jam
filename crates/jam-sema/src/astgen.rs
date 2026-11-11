@@ -330,10 +330,12 @@ fn pop_drop_scope_emitting(gctx: &mut AstGenCtx) {
 /// Bind a `var`/`const` local in the innermost scope, remembering what it
 /// shadows so the scope's end restores it.
 fn bind_scoped_local(gctx: &mut AstGenCtx, name: &str, slot: JirRef, ty: TypeIdx) {
-    let prior = gctx
-        .locals
-        .get(name)
-        .map(|&s| (s, gctx.local_types.get(name).copied().unwrap_or(TypeIdx::NONE)));
+    let prior = gctx.locals.get(name).map(|&s| {
+        (
+            s,
+            gctx.local_types.get(name).copied().unwrap_or(TypeIdx::NONE),
+        )
+    });
     if let Some(saves) = gctx.shadow_saves.last_mut() {
         saves.push((name.to_string(), prior));
     }
@@ -1370,7 +1372,11 @@ fn astgen_expr(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result
     astgen_expr_node(gctx, node, expected)
 }
 
-fn astgen_expr_node(gctx: &mut AstGenCtx, node: NodeIdx, expected: TypeIdx) -> Result<JirRef, String> {
+fn astgen_expr_node(
+    gctx: &mut AstGenCtx,
+    node: NodeIdx,
+    expected: TypeIdx,
+) -> Result<JirRef, String> {
     let n = *gctx.ctx.node_store.get(node);
     gctx.current_node = node;
     match n.tag {
@@ -1817,7 +1823,9 @@ fn lower_const_init(
     if mc.declared_type.is_none() && !plain_literal && want != gctx.cast_hint {
         let wk = gctx.ctx.type_pool.get(resolve_for_cmp(gctx.ctx, want));
         if wk.kind == TypeKind::Int
-            && let ComptimeValue::Int { bits, is_signed, .. } = fold_const_in_module(gctx, mc)
+            && let ComptimeValue::Int {
+                bits, is_signed, ..
+            } = fold_const_in_module(gctx, mc)
             && !comp_int_fits(bits, is_signed, wk.a as u16, wk.b != 0)
         {
             let shown = if is_signed {
@@ -1839,10 +1847,8 @@ fn lower_const_init(
     gctx.ctx.push_const_scope(module.to_string());
     let saved_locals = std::mem::take(&mut gctx.locals);
     let saved_local_types = std::mem::take(&mut gctx.local_types);
-    let saved_comp_scope = std::mem::replace(
-        &mut gctx.comp_scope,
-        crate::comptime::ComptimeScope::new(),
-    );
+    let saved_comp_scope =
+        std::mem::replace(&mut gctx.comp_scope, crate::comptime::ComptimeScope::new());
     // Nor to the caller's generic parameters (`want` is already concrete).
     gctx.ctx.push_subst(HashMap::new());
     // A const used inside another const's init keeps the outermost anchor:
@@ -1928,7 +1934,9 @@ fn astgen_variable(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Resu
         .find_map(|m| gctx.ctx.get_function_ast(&format!("{m}.{name}")))
         .or_else(|| {
             // In the entry, its own fn of that name wins (the bare key).
-            if bm.is_empty() && gctx.ctx.const_lookup_module().is_empty() && gctx.ctx.is_entry_fn(&name)
+            if bm.is_empty()
+                && gctx.ctx.const_lookup_module().is_empty()
+                && gctx.ctx.is_entry_fn(&name)
             {
                 return None;
             }
@@ -2642,7 +2650,8 @@ fn resolve_for_cmp_step(ctx: &CodegenContext, t: TypeIdx) -> TypeIdx {
     {
         let k = ctx.type_pool.get(t);
         if k.kind == TypeKind::Named && ctx.has_active_subst() {
-            let name = String::from_utf8_lossy(&ctx.string_pool.get(StringIdx::new(k.a))).into_owned();
+            let name =
+                String::from_utf8_lossy(&ctx.string_pool.get(StringIdx::new(k.a))).into_owned();
             let sub = ctx.lookup_current_subst(&name);
             if !sub.is_none() {
                 ctx.push_subst(HashMap::new());
@@ -3096,7 +3105,8 @@ fn check_call_into_slot(
             None => return Ok(()),
         }
     };
-    if call_ty.is_none() || call_ty == builtin::NORETURN || types_match(gctx.ctx, slot_ty, call_ty) {
+    if call_ty.is_none() || call_ty == builtin::NORETURN || types_match(gctx.ctx, slot_ty, call_ty)
+    {
         return Ok(());
     }
     // Scalars and pointers keep the existing value-path rules.
@@ -3105,7 +3115,9 @@ fn check_call_into_slot(
         matches!(k, TypeKind::Struct | TypeKind::Named | TypeKind::Array)
     };
     if r == NO_JIR_REF || (is_aggregate(slot_ty) && is_aggregate(call_ty)) {
-        return Err("type mismatch: the call returns a different type than the slot it fills".into());
+        return Err(
+            "type mismatch: the call returns a different type than the slot it fills".into(),
+        );
     }
     Ok(())
 }
@@ -6655,7 +6667,11 @@ fn check_pattern_int_fits(
     if sk.kind != TypeKind::Int {
         return Ok(());
     }
-    let bits = if negative { (val as i64).wrapping_neg() as u64 } else { val };
+    let bits = if negative {
+        (val as i64).wrapping_neg() as u64
+    } else {
+        val
+    };
     // `-M` with M above 2^63 wraps: it fits nothing.
     if !(negative && val > (1u64 << 63)) && comp_int_fits(bits, negative, sk.a as u16, sk.b != 0) {
         return Ok(());
@@ -6718,7 +6734,10 @@ fn collect_switch_cases(
                 let mc = lookup_bare_const(gctx, &cname);
                 if let Some(mc) = mc {
                     let v = fold_const_in_module(gctx, &mc);
-                    if let ComptimeValue::Int { bits, is_signed, .. } = v {
+                    if let ComptimeValue::Int {
+                        bits, is_signed, ..
+                    } = v
+                    {
                         let sk = gctx.ctx.type_pool.get(scrut_ty);
                         let signed = sk.kind == TypeKind::Int && sk.b != 0;
                         // Out of the scrutinee's range: see the literal arm.
@@ -6836,8 +6855,18 @@ fn astgen_pattern_compare(
             let lo_hi = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 1));
             let hi_lo = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 2));
             let hi_hi = gctx.ctx.node_store.get_extra(ExtraIdx::new(ex + 3));
-            check_pattern_int_fits(gctx, (lo_lo as u64) | ((lo_hi as u64) << 32), p.flags & 1 != 0, scrut_ty)?;
-            check_pattern_int_fits(gctx, (hi_lo as u64) | ((hi_hi as u64) << 32), p.flags & 2 != 0, scrut_ty)?;
+            check_pattern_int_fits(
+                gctx,
+                (lo_lo as u64) | ((lo_hi as u64) << 32),
+                p.flags & 1 != 0,
+                scrut_ty,
+            )?;
+            check_pattern_int_fits(
+                gctx,
+                (hi_lo as u64) | ((hi_hi as u64) << 32),
+                p.flags & 2 != 0,
+                scrut_ty,
+            )?;
             let lo_k = emit(
                 gctx,
                 JirInst {
@@ -8179,7 +8208,13 @@ fn astgen_member_access(
                         );
                     }
                 }
-                return lower_const_init(gctx, &mc, expected, false, &format!("{base_name}.{member}"));
+                return lower_const_init(
+                    gctx,
+                    &mc,
+                    expected,
+                    false,
+                    &format!("{base_name}.{member}"),
+                );
             }
             // A function through the handle as a value (`lib.f`). Externs and
             // exports register under their bare C name.
