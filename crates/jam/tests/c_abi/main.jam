@@ -1,0 +1,229 @@
+// Jam side of the C-ABI suite (crates/jam/tests/c_abi.rs), after Zig's
+// test/c_abi/main.zig: direct `extern fn` calls into cfuncs.c with
+// structs by value, `export fn`s that cfuncs.c's c_run_tests() calls, and
+// the same exports reached from Jam (Jam-ABI body) and by address through
+// `@callC` (the C-ABI wrapper). Exit code: number of failed checks.
+
+extern fn printf(fmt: *const[] u8, ...) i32;
+extern fn exit(code: i32) noreturn;
+
+const cmod = import("c_abi_mod");
+
+const P = struct { a: i32, b: i32 };
+const T12 = struct { a: i32, b: i32, c: i32 };
+const L2 = struct { a: i64, b: i64 };
+const D2 = struct { x: f64, y: f64 };
+const F3 = struct { x: f32, y: f32, z: f32 };
+const Mix = struct { a: i64, d: f64 };
+const Big = struct { a: i64, b: i64, c: i64, d: i64 };
+const Flag = struct { on: bool, n: i32 };
+// Same name as c_abi_mod.jam's 8-byte Pair, different size: that module's
+// extern must classify its own Pair.
+const Pair = struct { a: i64, b: i64, c: i64 };
+const UF = union { a: f32, b: f32 };
+const E = enum { Num(i32), Nothing };
+const Z = struct {};
+
+extern fn c_mk_p(a: i32, b: i32) P;
+extern fn c_sum_p(p: P) i32;
+extern fn c_mk_t12(a: i32) T12;
+extern fn c_sum_t12(t: T12) i32;
+extern fn c_mk_l2(a: i64) L2;
+extern fn c_sum_l2(l: L2) i64;
+extern fn c_mk_d2(x: f64) D2;
+extern fn c_sum_d2(d: D2) f64;
+extern fn c_mk_f3(x: f32) F3;
+extern fn c_sum_f3(f: F3) f32;
+extern fn c_mk_mix(a: i64) Mix;
+extern fn c_sum_mix(m: Mix) f64;
+extern fn c_mk_big(x: i64) Big;
+extern fn c_sum_big(g: Big) i64;
+extern fn c_mk_flag(on: bool, n: i32) Flag;
+extern fn c_flag_val(f: Flag) i32;
+extern fn c_mixed(a: i32, g: Big, p: P, d: D2, z: i64) i64;
+extern fn c_gp_exhaust(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, s: L2, tail: i64) i64;
+extern fn c_fp_exhaust(d0: f64, d1: f64, d2: f64, d3: f64, d4: f64, d5: f64, d6: f64, s: D2, tail: f64) f64;
+extern fn c_run_tests() i32;
+extern fn c_bump(p: mut P);
+extern fn c_bump_by(x: mut i32, p: P);
+extern fn c_first_diff(a: [4]u8, b: [4]u8, n: i32) i32;
+extern fn c_bump_with(p: mut P, by: P);
+extern fn c_mk_uf(x: f32) UF;
+extern fn c_uf(u: UF) f32;
+extern fn c_id_e(e: E) E;
+extern fn c_z(z: Z, k: i32) i32;
+extern fn c_va(n: i32, ...) i32;
+fn Pt(T: type) type { return struct { x: T, y: T }; }
+extern fn c_sum_pt(d: Pt(f64)) f64;
+extern fn c_mk_pt(x: f64) Pt(f64);
+extern fn c_cb_pt(f: fn(Pt(f64)) f64) f64;
+extern fn c_s16(x: i16) i32;
+extern fn c_u8(x: u8) i32;
+extern fn c_ret_s16(x: i32) i16;
+extern fn c_va_promote(n: i32, ...) f64;
+fn sumPt(d: Pt(f64)) f64 { return d.x * 100.0 + d.y; }
+extern fn c_cb_i8(f: fn(i32) i8) i32;
+// Also declared by c_abi_mod.jam with its own Q: same layout, so both agree.
+const MQ = struct { x: f64, y: f64 };
+extern fn c_mod_q(q: MQ) f64;
+extern fn c_addr_id8() u64;
+const Shade = enum { Light, Dark };
+const Px = struct { r: u8 };
+extern fn c_enum_tag(e: Shade) i64;
+extern fn c_slice_len(s: []Px) i64;
+export fn jam_id8(x: i8) i8 { return x; }
+extern fn c_cb_bool(f: fn(i32) bool) i32;
+extern fn c_cb_u16(f: fn(i32) u16) i32;
+fn toI8(x: i32) i8 { return x as i8; }
+fn isOdd(x: i32) bool { return (x & 1) == 1; }
+fn toU16(x: i32) u16 { return x as u16; }
+fn wide(x: i32) i32 { return x; }
+
+export fn jam_mk_p(a: i32, b: i32) P { return P { a: a, b: b }; }
+export fn jam_sum_p(p: P, k: i32) i32 { return p.a * 100 + p.b * 10 + k; }
+export fn jam_mk_t12(a: i32) T12 { return T12 { a: a, b: a + 1, c: a + 2 }; }
+export fn jam_mk_l2(a: i64) L2 { return L2 { a: a, b: a * 2 }; }
+export fn jam_mk_d2(x: f64) D2 { return D2 { x: x, y: x / 2.0 }; }
+export fn jam_sum_d2(d: D2) f64 { return d.x + d.y; }
+export fn jam_mk_f3(x: f32) F3 { return F3 { x: x, y: x + 1.0, z: x + 2.0 }; }
+export fn jam_mk_mix(a: i64) Mix { return Mix { a: a, d: (a as f64) + 0.5 }; }
+export fn jam_mk_big(x: i64) Big { return Big { a: x, b: x + 1, c: x + 2, d: x + 3 }; }
+export fn jam_sum_big(g: Big, k: i32) i64 { return g.a + g.b + g.c + g.d + (k as i64); }
+export fn jam_mk_flag(on: bool, n: i32) Flag { return Flag { on: on, n: n }; }
+export fn jam_gp_exhaust(a0: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64, s: L2, tail: i64) i64 {
+    return a6 + s.a * 10 + s.b * 100 + tail * 1000;
+}
+export fn jam_fp_exhaust(d0: f64, d1: f64, d2: f64, d3: f64, d4: f64, d5: f64, d6: f64, s: D2, tail: f64) f64 {
+    return d6 + s.x * 10.0 + s.y * 100.0 + tail * 1000.0;
+}
+
+export fn jam_bump(p: mut P, by: P) {
+    p.a = p.a + by.a;
+    p.b = p.b + by.b;
+}
+export fn jam_uf(u: UF) f32 { return u.b * 2.0; }
+export fn jam_z(z: Z, k: i32) i32 { return k * 2; }
+
+fn isNum(e: E, want: i32) bool {
+    match (e) {
+        Num(v) { return v == want; }
+        Nothing { return false; }
+    }
+    return false;
+}
+
+// Never called: it only has to compile (a noreturn export with an aggregate
+// param once crashed codegen).
+export fn jam_die(p: P) noreturn { exit(p.a); }
+
+const Tally = struct { fails: i32 };
+
+fn check(t: mut Tally, name: *const[] u8, good: bool) {
+    if (good) {
+        printf("ok   jam->c %s\n", name);
+    } else {
+        printf("FAIL jam->c %s\n", name);
+        t.fails = t.fails + 1;
+    }
+}
+
+fn main() i32 {
+    var t: Tally = Tally { fails: 0 };
+
+    var p: P = c_mk_p(5, 6);
+    check(t, "8B return", p.a == 5 && p.b == 6);
+    check(t, "8B arg", c_sum_p(p) == 56);
+    var t12: T12 = c_mk_t12(5);
+    check(t, "12B return", t12.a == 5 && t12.b == 6 && t12.c == 7);
+    check(t, "12B arg", c_sum_t12(t12) == 18);
+    var l: L2 = c_mk_l2(21);
+    check(t, "16B return", l.a == 21 && l.b == 42);
+    check(t, "16B arg", c_sum_l2(l) == 63);
+    var d: D2 = c_mk_d2(3.0);
+    check(t, "HFA2 return", d.x == 3.0 && d.y == 1.5);
+    check(t, "HFA2 arg", c_sum_d2(d) == 4.5);
+    var f: F3 = c_mk_f3(1.0);
+    check(t, "HFA3 return", f.x == 1.0 && f.z == 3.0);
+    check(t, "HFA3 arg", c_sum_f3(f) == 6.0);
+    var m: Mix = c_mk_mix(4);
+    check(t, "mixed INT/SSE return", m.a == 4 && m.d == 4.5);
+    check(t, "mixed INT/SSE arg", c_sum_mix(m) == 8.5);
+    var g: Big = c_mk_big(10);
+    check(t, "memory-class return", g.a == 10 && g.d == 13);
+    check(t, "memory-class arg", c_sum_big(g) == 46);
+    var fl: Flag = c_mk_flag(true, 9);
+    check(t, "bool member return", fl.on && fl.n == 9);
+    check(t, "bool member arg", c_flag_val(fl) == 9);
+    var big: Big = Big { a: 1, b: 2, c: 3, d: 4 };
+    var pp: P = P { a: 10, b: 20 };
+    check(t, "mixed args", c_mixed(1, big, pp, d, 1000) == 1 + 1 + 4 + 10 + 20 + 3 + 1000);
+    var s: L2 = L2 { a: 2, b: 3 };
+    check(t, "GP exhaustion arg", c_gp_exhaust(0, 0, 0, 0, 0, 0, 7, s, 4) == 4327);
+    var sd: D2 = D2 { x: 2.0, y: 3.0 };
+    check(t, "FP exhaustion arg", c_fp_exhaust(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, sd, 4.0) == 4327.0);
+
+    var mp: P = P { a: 1, b: 2 };
+    c_bump(mp);
+    check(t, "mut struct param is a pointer", mp.a == 11 && mp.b == 2);
+    var x: i32 = 5;
+    c_bump_by(x, mp);
+    check(t, "mut scalar beside a by-value struct", x == 7);
+    var a4: [4]u8 = [1, 2, 3, 4];
+    var b4: [4]u8 = [1, 2, 9, 4];
+    check(t, "array param decays to a pointer", c_first_diff(a4, b4, 4) == 2);
+    var by: P = P { a: 5, b: 6 };
+    var mp2: P = P { a: 1, b: 2 };
+    c_bump_with(mp2, by);
+    check(t, "mut struct beside a by-value struct", mp2.a == 6 && mp2.b == 8);
+    var uf: UF = c_mk_uf(2.5);
+    check(t, "float union (HFA) return", uf.a == 2.5);
+    check(t, "float union (HFA) arg", c_uf(uf) == 5.0);
+    check(t, "payload enum round trip", isNum(c_id_e(E.Num(7)), 7));
+    var z: Z = Z {};
+    check(t, "empty struct arg", c_z(z, 21) == 42);
+    var vp: P = P { a: 3, b: 4 };
+    check(t, "struct through varargs", c_va(1, vp) == 134);
+    var big3: Pair = Pair { a: 0, b: 0, c: 0 };
+    check(t, "extern in another module, same-named struct", cmod.viaModPair() == 56 && big3.c == 0);
+    check(t, "imported extern called across modules", cmod.c_mod_sum(cmod.c_mod_pair(3, 4)) == 34);
+
+    var gp: Pt(f64) = Pt(f64) { x: 1.0, y: 2.0 };
+    check(t, "generic instance struct arg", c_sum_pt(gp) == 12.0);
+    var gm: Pt(f64) = c_mk_pt(5.0);
+    check(t, "generic instance struct return", gm.x == 5.0 && gm.y == 6.0);
+    check(t, "generic instance struct through a C callback", c_cb_pt(sumPt) == 304.0);
+    check(t, "i16 arg is sign-extended", c_s16(wide(65536 + 5) as i16) == 5);
+    check(t, "u8 arg is zero-extended", c_u8(wide(256 + 7) as u8) == 7);
+    check(t, "i16 return", c_ret_s16(65536 - 2) == -2);
+    var own: MQ = MQ { x: 3.0, y: 4.0 };
+    check(t, "entry and module declare one extern with their own same-layout struct", c_mod_q(own) == 34.0);
+    check(t, "a narrow-int export has one address", c_addr_id8() == (jam_id8 as u64));
+    check(t, "two modules' own unit enums cross as one tag", c_enum_tag(Shade.Dark) == 1 && cmod.viaModEnum() == 2);
+    var pxs: [2]Px = [Px { r: 1 }, Px { r: 2 }];
+    check(t, "two modules' own element types cross as one slice", c_slice_len(pxs[0..2]) == 2 && cmod.viaModSlice() == 3);
+    var mq: cmod.Q = cmod.Q { x: 1.0, y: 2.0 };
+    check(t, "imported extern takes its module's struct from a local", cmod.c_mod_q(mq) == 12.0);
+    check(t, "imported extern returns a big payload enum", cmod.bigEnumSum(cmod.c_big_enum(1)) == 6);
+    check(t, "imported extern takes a big payload enum", cmod.c_big_enum_sum(cmod.c_big_enum(4)) == 15);
+    check(t, "imported export uses its module's own types", cmod.jam_mod_local(4000) == 4320);
+    check(t, "i8-returning Jam callback is extended for C", c_cb_i8(toI8) == 44);
+    check(t, "bool-returning Jam callback", c_cb_bool(isOdd) == 1);
+    check(t, "u16-returning Jam callback is extended for C", c_cb_u16(toU16) == 9);
+    var vf: f32 = 1.5;
+    var vi: i8 = -3;
+    check(t, "varargs promote f32 and i8", c_va_promote(2, vf, vi) == 147.0);
+
+    // The exports from Jam: direct calls use the Jam-ABI body; `fn as u64`
+    // is the C-ABI wrapper, called here the way C would via @callC.
+    var jp: P = jam_mk_p(8, 9);
+    check(t, "export via body", jp.a == 8 && jp.b == 9 && jam_sum_p(jp, 1) == 891);
+    var jb: Big = jam_mk_big(5);
+    check(t, "export via body, memory class", jb.d == 8 && jam_sum_big(jb, 0) == 26);
+    var wp: P = @callC(P, jam_mk_p as u64, 4 as i32, 6 as i32);
+    check(t, "export via wrapper", wp.a == 4 && wp.b == 6);
+    var wb: Big = @callC(Big, jam_mk_big as u64, 2 as i64);
+    check(t, "export via wrapper, memory class", wb.a == 2 && wb.d == 5);
+
+    var cfails: i32 = c_run_tests();
+    return t.fails + cfails;
+}

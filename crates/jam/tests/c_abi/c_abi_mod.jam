@@ -1,0 +1,51 @@
+// Helper module for crates/jam/tests/c_abi/main.jam: an imported `pub
+// extern` returning this module's 8-byte Pair, while main.jam declares a
+// 24-byte Pair of its own. The prototype must be classified in this
+// module's scope (one GP word), not the entry module's (sret).
+
+pub const Pair = struct { a: i32, b: i32 };
+pub const Q = struct { x: f64, y: f64 };
+pub extern fn c_mod_pair(a: i32, b: i32) Pair;
+pub extern fn c_mod_sum(p: Pair) i32;
+// Its param type is this module's `Q` (D2-shaped), also when called from
+// main.jam with a local `cmod.Q`.
+pub extern fn c_mod_q(q: Q) f64;
+
+pub fn viaModPair() i32 {
+    var p: Pair = c_mod_pair(5, 6);
+    return p.a * 10 + p.b;
+}
+
+// Same C symbols as main.jam, with this module's own enum and element type.
+pub const Color = enum { Red, Green, Blue };
+pub const Cell = struct { v: i64 };
+pub extern fn c_enum_tag(e: Color) i64;
+pub extern fn c_slice_len(s: []Cell) i64;
+pub fn viaModEnum() i64 { return c_enum_tag(Color.Blue); }
+pub fn viaModSlice() i64 {
+    var cells: [3]Cell = [Cell { v: 1 }, Cell { v: 2 }, Cell { v: 3 }];
+    return c_slice_len(cells[0..3]);
+}
+
+// A payload enum over 16 bytes (memory class) through an imported extern and
+// export. The prototypes are declared before the module's type bodies exist,
+// which left a half-declared function (no sret / byval) behind.
+pub const BigE = enum { N, B(i64, i64, i64) };
+pub extern fn c_big_enum(x: i64) BigE;
+pub extern fn c_big_enum_sum(e: BigE) i64;
+pub fn bigEnumSum(e: BigE) i64 {
+    match (e) {
+        BigE.B(a, b, c) { return a + b + c; }
+        _ { return -1; }
+    }
+    return 0;
+}
+pub export fn jam_big_enum_sum(e: BigE) i64 { return bigEnumSum(e); }
+
+// An export's body uses this module's private type: it lowers in this
+// module's scope, not the entry's (which has no `Local`).
+const Local = struct { a: i64, b: i64, c: i64 };
+pub export fn jam_mod_local(x: i64) i64 {
+    var q: Local = Local { a: x, b: 20, c: 300 };
+    return q.a + q.b + q.c;
+}
