@@ -12,7 +12,7 @@
     --accent: #8cc7d9;
     --accent-bg: rgba(140, 199, 217, 0.14);
     --sidebar-w: 21rem;
-    --mono: 'Menlo', 'Monaco', 'Courier New', monospace;
+    --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Menlo', 'Consolas', monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
