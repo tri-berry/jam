@@ -13,6 +13,8 @@ exclude:
   - Gemfile
   - Gemfile.lock
   - README.md
+  - Makefile
+  - vendor
 
 # Default front matter
 defaults:
