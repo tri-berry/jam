@@ -1,0 +1,11 @@
+// A call whose result is written straight into a typed variable must
+// return that type (a same-named struct from another module used to be
+// read with the wrong layout).
+// expect-error: type mismatch: the call returns a different type than the slot it fills
+
+const m = import("mod_other_node");
+const Node = struct { a: i64, b: i64, n: i64 };
+
+fn main() {
+    var x: Node = m.mkNode();
+}

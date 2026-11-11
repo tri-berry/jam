@@ -1,0 +1,10 @@
+// A u64 argument to a u8 parameter used to be passed as an i64 against an
+// i8 signature (malformed IR); it now needs an explicit cast.
+// expect-error: type mismatch in argument `x`: expected `u8`, found `u64`; use an explicit `as` cast
+
+fn take(x: u8) u8 { return x; }
+
+fn main() {
+    var big: u64 = 300;
+    take(big);
+}

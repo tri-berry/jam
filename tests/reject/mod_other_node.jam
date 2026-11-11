@@ -1,0 +1,2 @@
+pub const Node = struct { n: i64 };
+pub fn mkNode() Node { return Node { n: 3 }; }

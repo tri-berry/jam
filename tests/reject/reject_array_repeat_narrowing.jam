@@ -1,0 +1,8 @@
+// `[big; 2]` into a [2]u8 used to store 8 bytes per element, clobbering
+// the neighbouring slot (a[1] read 44 at -O0, 1 at -O3).
+// expect-error: type mismatch in array repeat value: expected `u8`, found `u64`; use an explicit `as` cast
+
+fn main() {
+    var big: u64 = 300;
+    var a: [2]u8 = [big; 2];
+}

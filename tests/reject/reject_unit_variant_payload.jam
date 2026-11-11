@@ -1,0 +1,9 @@
+// A unit variant of a generic enum takes no payload (extra values used to
+// be ignored).
+// expect-error: `A` takes 0 payload value(s), 2 given
+
+fn K(U: type) type { return enum { A, B }; }
+
+fn main() {
+    var k = K(i64).A(5, 6);
+}

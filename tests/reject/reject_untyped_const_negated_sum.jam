@@ -1,0 +1,9 @@
+// A negated computed const is checked like any computed one (`-(100 + 100)`
+// was evaluated at `i8` width and wrapped).
+// expect-error: the value of const `N` (-200) does not fit `i8`
+
+const N = -(100 + 100);
+
+fn main() {
+    var x: i8 = N;
+}

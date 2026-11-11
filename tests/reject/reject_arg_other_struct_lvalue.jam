@@ -1,0 +1,13 @@
+// A variable of another struct type can't be passed for a struct parameter
+// (it used to be handed over by pointer unchecked; with `mut` it wrote past
+// the smaller struct).
+// expect-error: type mismatch in argument `a`: the value is a different type than the slot
+
+const A = struct { x: i64, y: i64 };
+const B = struct { x: u8 };
+fn bump(a: mut A) { a.y = a.y + 1; }
+
+fn main() {
+    var b = B { x: 1 };
+    bump(b);
+}

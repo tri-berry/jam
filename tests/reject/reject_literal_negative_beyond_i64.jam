@@ -1,0 +1,7 @@
+// No 64-bit int holds a negative magnitude above 2^63; this used to wrap
+// to 9223372036854775807.
+// expect-error: integer literal -9223372036854775809 does not fit `i64`
+
+fn main() {
+    var v: i64 = -9223372036854775809;
+}

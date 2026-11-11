@@ -1,0 +1,11 @@
+// A struct-literal field takes only its own struct type (a different struct
+// used to be stored and read with the wrong layout).
+// expect-error: type mismatch in struct literal field: the value is a different type than the slot
+
+const A = struct { x: i64, y: i64 };
+const B = struct { x: u8 };
+const H = struct { a: A };
+
+fn main() {
+    var h = H { a: B { x: 1 } };
+}

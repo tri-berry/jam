@@ -1,0 +1,11 @@
+// A negative pattern beyond i64 doesn't wrap into range.
+// expect-error: match pattern -9223372036854775809 does not fit the scrutinee's type `i64`
+
+fn main() {
+    var x: i64 = 9223372036854775807;
+    var r: i32 = 0;
+    match (x) {
+        -9223372036854775809 { r = 1; }
+        _ { r = 0; }
+    }
+}

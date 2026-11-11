@@ -1,0 +1,10 @@
+// An untyped module const takes the use site's type like the literal it
+// spells, and a literal that doesn't fit is rejected rather than truncated
+// (`var b: u8 = 70000` used to store 112).
+// expect-error: integer literal 70000 does not fit `u8`
+
+const BIG = 70000;
+
+fn main() {
+    var b: u8 = BIG;
+}

@@ -1,0 +1,12 @@
+// A match pattern the scrutinee can't hold is rejected (it used to match
+// the truncated value: `300` matched a `u8` holding 44).
+// expect-error: match pattern 300 does not fit the scrutinee's type `u8`
+
+fn main() {
+    var x: u8 = 44;
+    var r: i32 = 0;
+    match (x) {
+        300 { r = 1; }
+        _ { r = 0; }
+    }
+}

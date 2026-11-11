@@ -1,0 +1,13 @@
+// Plain assignment to a float-typed local gets the same int->float
+// rejection as its `var` declaration.
+// expect-error: cannot assign integer to float-typed `x`; use a float literal (e.g. `3.0`) or an explicit `as` cast
+
+fn f(n: i32) f32 {
+    var x: f32 = 0.0;
+    x = n;
+    return x;
+}
+
+fn main() {
+    f(1);
+}

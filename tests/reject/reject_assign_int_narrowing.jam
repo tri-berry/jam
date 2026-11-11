@@ -1,0 +1,12 @@
+// Assignment is type-checked like a `var` init. It used to store the
+// value at its own width, so `arr[i] = i` (u64 loop counter into a u8
+// element) wrote 8 bytes; at index 15 of a [16]u8 that ran past the
+// array and -O1 and up folded the read to garbage.
+// expect-error: type mismatch in `arr`: assigned value has a different type
+
+fn main() {
+    var arr: [16]u8 = [0; 16];
+    for i in 0:16 {
+        arr[i] = i;
+    }
+}

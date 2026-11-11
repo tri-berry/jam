@@ -1,0 +1,10 @@
+// A u64 in a u8 struct-literal field used to be stored as 8 bytes,
+// overrunning the 2-byte struct.
+// expect-error: type mismatch in struct literal field: expected `u8`, found `u64`; use an explicit `as` cast
+
+const S = struct { a: u8, b: u8 };
+
+fn main() {
+    var big: u64 = 300;
+    var s: S = S { a: big, b: 1 };
+}

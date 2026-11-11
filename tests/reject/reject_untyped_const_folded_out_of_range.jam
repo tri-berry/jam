@@ -1,0 +1,9 @@
+// An untyped const's folded value must fit where it is used (`1 << 10` was
+// computed at `u8` width and gave garbage).
+// expect-error: the value of const `SH` (1024) does not fit `u8`
+
+const SH = 1 << 10;
+
+fn main() {
+    var x: u8 = SH;
+}
