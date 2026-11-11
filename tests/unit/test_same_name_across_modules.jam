@@ -1,0 +1,28 @@
+// A bare name inside a module means that module's own fn or const, also
+// when it is taken as a fn value or used inside a const read from outside.
+// Both helper modules and this one define `helper` and `BASE`.
+
+const a = import("mod_same_name_a");
+const b = import("mod_same_name_b");
+
+const BASE = 30;
+fn helper(x: i32) i32 { return x + 100; }
+
+tfn fnValueUsesOwnModulesFn() {
+    assert(a.run(), 1);
+    assert(b.run(), 2);
+    var f: fn(i32) i32 = helper;
+    assert(f(0), 100);
+}
+
+tfn importedConstInitUsesItsModule() {
+    var x: i32 = a.C;
+    assert(x, 11);
+    assert(b.C, 21);
+    assert(BASE, 30);
+}
+
+tfn importedConstHoldingAFn() {
+    var f: fn(i32) i32 = a.F;
+    assert(f(1), 2);
+}

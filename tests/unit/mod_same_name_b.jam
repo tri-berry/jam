@@ -1,0 +1,5 @@
+// See mod_same_name_a.jam.
+const BASE = 20;
+fn helper(x: i32) i32 { return x + 2; }
+pub fn run() i32 { var f: fn(i32) i32 = helper; return f(0); }
+pub const C = BASE + 1;

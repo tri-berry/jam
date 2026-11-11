@@ -1,0 +1,7 @@
+// A by-value cycle between an imported module's struct and enum is
+// diagnosed like one in a single file (the module's bare `E` read as no
+// known type, so the cycle went unseen and overflowed the stack).
+// expect-error: struct `mod_cycle_struct_enum.S` depends on itself
+const m = import("mod_cycle_struct_enum");
+
+fn main() i32 { return m.get(m.E.N()) as i32; }

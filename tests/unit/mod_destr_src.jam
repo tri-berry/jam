@@ -1,0 +1,8 @@
+// Helpers for test_entry_names_win.jam: a module with an `A` (drop adds 1)
+// and fns named like the test file's own.
+pub const A = struct { s: *mut i64, n: i64 };
+cfn drop(self: mut A) { var p: *mut i64 = self.s; p.* = p.* + 1; }
+pub fn twice(v: i64) i64 { return v * 2; }
+pub fn mkA(s: *mut i64, n: i64) A { return A { s: s, n: n }; }
+pub const B = struct { k: i64, m: i64 };
+pub fn mkB(k: i64) B { return B { k: k, m: k * 2 }; }

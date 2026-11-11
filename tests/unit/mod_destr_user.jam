@@ -1,0 +1,22 @@
+// See mod_destr_src.jam: a module that destructures `A` (and must get
+// mod_destr_src's, without affecting the test file's own `A`).
+const { A, mkA, B, mkB } = import("mod_destr_src");
+pub fn makeAndDrop(s: *mut i64) i64 { var a: A = mkA(s, 5); return a.n; }
+
+// A struct field typed by the destructured `A`, and generic method bodies
+// typed by the destructured `A` and `B`. (Only when the test file's own `A`
+// is the instance's type argument does a bare `A` in the body mean it.)
+pub const H = struct { a: A, n: i64 };
+pub fn mkH(s: *mut i64) H { return H { a: mkA(s, 4), n: 77 }; }
+pub fn sizeH() u64 { return @sizeOf(H); }
+pub fn G(T: type) type {
+    return struct {
+        v: T,
+        pub fn viaB(self: Self) i64 { var b: B = mkB(9); return b.m; }
+        pub fn viaA(self: Self, s: *mut i64) i64 { var a: A = mkA(s, 9); return a.n; }
+        pub fn sizeT(self: Self) u64 { return @sizeOf(T); }
+        // A nested instance of this generic whose body names `A`, lowered
+        // from inside another instance's method.
+        pub fn nested(self: Self, s: *mut i64) i64 { var h = G(i64) { v: 0 }; return h.viaA(s); }
+    };
+}

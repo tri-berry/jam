@@ -1,0 +1,2 @@
+// For test_swapped_import_handles.jam.
+pub const S = struct { y: i32 };

@@ -1,0 +1,7 @@
+// With mod_same_name_b.jam: two modules each with a private `helper` and a
+// private `BASE`, used as a fn value and inside a pub const's init.
+const BASE = 10;
+fn helper(x: i32) i32 { return x + 1; }
+pub fn run() i32 { var f: fn(i32) i32 = helper; return f(0); }
+pub const C = BASE + 1;
+pub const F = helper;

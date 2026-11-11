@@ -1,0 +1,10 @@
+// For reject_cycle_in_imported_module.jam.
+pub const S = struct { e: E, k: i64 };
+pub const E = enum { N, A(S) };
+pub fn get(e: E) i64 {
+    match (e) {
+        E.A(s) { return s.k; }
+        _ { return -1; }
+    }
+    return 0;
+}

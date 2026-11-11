@@ -1,0 +1,4 @@
+// A module that destructures `A` but declares its own `A`: its own wins.
+const { A } = import("mod_destr_src");
+pub const A = struct { q: u8 };
+pub fn lit() i64 { var a: A = A { q: 9 }; return a.q as i64; }

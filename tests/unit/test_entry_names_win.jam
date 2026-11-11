@@ -1,0 +1,86 @@
+// The entry's own fn and type win over destructured ones of the same name:
+// `twice` is this file's, and this file's `A` keeps its own drop even though
+// an imported module destructures another `A` (both used to be taken over).
+const { twice } = import("mod_destr_src");
+const u = import("mod_destr_user");
+const o = import("mod_destr_own");
+const { Vec } = import("std/collections");
+
+const A = struct {
+    s: *mut i64,
+    n: i64,
+    pad: [4]i64,
+    cfn drop(self: mut A) { var p: *mut i64 = self.s; p.* = p.* + 10; }
+};
+
+fn twice(v: i64) i64 { return v + 1000; }
+
+fn dropOwn(s: *mut i64) { var a: A = A { s: s, n: 1, pad: [0, 0, 0, 0] }; }
+
+tfn entryFnWinsOverDestructured() {
+    assert(twice(1), 1001);
+    var f: fn(i64) i64 = twice;
+    assert(f(1), 1001);
+}
+
+tfn entryTypeKeepsItsDrop() {
+    var hits: i64 = 0;
+    dropOwn(&hits);
+    assert(hits, 10);
+}
+
+tfn moduleDestructuringIsScopedToTheModule() {
+    var hits: i64 = 0;
+    assert(u.makeAndDrop(&hits), 5);
+    assert(hits, 1);
+}
+
+tfn moduleFieldOfDestructuredTypeKeepsItsLayout() {
+    var hits: i64 = 0;
+    // The module's `A` is 16 bytes (this file's is 48): `H` is 24.
+    assert(@sizeOf(u.H) as i64, 24);
+    assert(u.sizeH() as i64, 24);
+    var v = Vec(u.H).empty();
+    var i: u32 = 0;
+    while (i < 8) { v.push(u.mkH(&hits)); i = i + 1; }
+    assert(v.len() as i64, 8);
+    var h = u.mkH(&hits);
+    assert(h.n, 77);
+}
+
+tfn destructuredTypeInModuleGenericMethod() {
+    var g = u.G(i64) { v: 1 };
+    assert(g.viaB(), 18);
+    // The test file declares its own, different `A`, not passed in here.
+    var hits: i64 = 0;
+    assert(g.viaA(&hits), 9);
+}
+
+tfn entryTypePassedToModuleGenericKeepsItsLayout() {
+    // This file's 48-byte `A` as the type argument, while the module also
+    // destructured a 16-byte `A`.
+    assert(@sizeOf(u.G(A)) as i64, 48);
+}
+
+tfn entryTypeInsideACompositeTypeArgument() {
+    // `[2]A` with this file's 48-byte `A`: the element keeps its layout.
+    var hits: i64 = 0;
+    var arr: [2]A = [A { s: &hits, n: 1, pad: [0, 0, 0, 0] }, A { s: &hits, n: 2, pad: [0, 0, 0, 0] }];
+    var g = u.G([2]A) { v: arr };
+    assert(g.sizeT() as i64, 96);
+}
+
+tfn nestedInstanceUsesItsModulesType() {
+    // `G(i64)` lowered from inside `G(A)`'s method still means the module's
+    // `A` (n = 9), and so does a later direct call of the same instance.
+    var hits: i64 = 0;
+    var arr: [1]A = [A { s: &hits, n: 1, pad: [0, 0, 0, 0] }];
+    var outer = u.G([1]A) { v: arr };
+    assert(outer.nested(&hits), 9);
+    var direct = u.G(i64) { v: 0 };
+    assert(direct.viaA(&hits), 9);
+}
+
+tfn moduleOwnTypeWinsOverItsDestructuring() {
+    assert(o.lit(), 9);
+}

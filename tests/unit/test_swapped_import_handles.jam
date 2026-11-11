@@ -1,0 +1,10 @@
+// Import handles named after each other's modules make `mod_swap_a.S` and
+// `mod_swap_b.S` aliases of each other; chasing them overflowed the stack.
+const mod_swap_a = import("mod_swap_b");
+const mod_swap_b = import("mod_swap_a");
+extern fn c_take(s: mod_swap_a.S) i64;
+
+tfn swappedHandlesResolve() {
+    var s = mod_swap_a.S { y: 1 };
+    assert(s.y, 1);
+}

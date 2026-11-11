@@ -1,0 +1,10 @@
+// An imported module's `export fn` taking a payload enum by value: its C
+// signature was classified before the enum's layout existed (size 2, not
+// 16), so the payload arrived truncated.
+const mh = import("mod_payload_enum_export");
+
+tfn importedPayloadEnumCrossesWhole() {
+    var f: fn(mh.E) i64 = mh.jam_payload_val;
+    assert(f(mh.mkv(1234567)), 1234567);
+    assert(mh.jam_payload_val(mh.mkv(-5)), -5);
+}
