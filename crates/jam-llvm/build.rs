@@ -178,11 +178,13 @@ fn main() {
     // (Homebrew), static otherwise (apt, a source build).
     let lld_lib = lld.join("lib");
     println!("cargo:rustc-link-search=native={}", lld_lib.display());
+    let mut lld_is_static = false;
     for name in ["lldMachO", "lldELF", "lldCommon"] {
         let shared = ["dylib", "so"]
             .iter()
             .any(|ext| lld_lib.join(format!("lib{name}.{ext}")).exists());
         let kind = if shared { "dylib" } else { "static" };
+        lld_is_static |= !shared;
         println!("cargo:rustc-link-lib={kind}={name}");
     }
 
@@ -238,6 +240,21 @@ fn main() {
                 .strip_prefix("-l")
                 .is_some_and(|name| static_syslibs.contains(&name));
             link_token(tok, if is_static { "static" } else { "dylib" });
+        }
+    }
+
+    // A static LLD calls zlib and zstd directly (compressed debug sections).
+    // With a static LLVM they are already in `--system-libs` above; with a
+    // shared libLLVM that list is empty, so name them here. This is the apt
+    // layout: static liblld*.a next to a shared libLLVM.
+    if lld_is_static && kind == "dylib" {
+        for name in ["z", "zstd"] {
+            let lib_kind = if static_syslibs.contains(&name) {
+                "static"
+            } else {
+                "dylib"
+            };
+            println!("cargo:rustc-link-lib={lib_kind}={name}");
         }
     }
 
