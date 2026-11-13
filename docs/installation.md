@@ -6,29 +6,58 @@ permalink: /installation/
 # Installation
 
 Jam is a statically typed systems language with mutable value semantics and an LLVM
-backend. There is no tagged release yet, but you can build the compiler from `main`
-today.
+backend. The current release is v{{ site.version }}, with prebuilt compilers for macOS
+and Linux.
 {: .lead}
 
 Expect things to move. Syntax and the standard library will keep changing until v0.1,
 and issues and pull requests on the repository stay closed until then.
 
-## macOS <span class="badge alpha">HEAD only</span>
+## Download <span class="badge alpha">v{{ site.version }}</span>
+{: #download}
 
 <div class="card">
     <img src="{{ '/assets/images/logo.png' | relative_url }}" alt="">
     <div class="card-text">
-        <div class="card-title">Homebrew formula</div>
-        <div class="card-sub">Builds the compiler from <code>main</code></div>
+        <div class="card-title">Jam v{{ site.version }}</div>
+        <div class="card-sub">Prebuilt compiler, standard library included</div>
     </div>
-    <a class="button" href="https://github.com/tri-berry/jam">GitHub</a>
+    <a class="button" href="https://github.com/tri-berry/jam/releases/tag/v{{ site.version }}">Download</a>
 </div>
 
-The formula builds the latest commit on `main` and pulls in LLVM 22 and Rust for you.
+Each archive is self-contained: the compiler, the standard library and everything it
+needs to link programs. Nothing else has to be installed, not even a C compiler.
+
+| Platform | Archive |
+|---|---|
+| macOS, Apple Silicon | `jam-v{{ site.version }}-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `jam-v{{ site.version }}-x86_64-apple-darwin.tar.gz` |
+| Linux, x86_64 | `jam-v{{ site.version }}-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux, ARM64 | `jam-v{{ site.version }}-aarch64-unknown-linux-gnu.tar.gz` |
+
+Download the archive for your platform, unpack it anywhere, and put its `bin` directory
+on your `PATH`:
+
+```bash
+curl -LO https://github.com/tri-berry/jam/releases/download/v{{ site.version }}/jam-v{{ site.version }}-aarch64-apple-darwin.tar.gz
+tar xzf jam-v{{ site.version }}-aarch64-apple-darwin.tar.gz
+export PATH="$PWD/jam-v{{ site.version }}-aarch64-apple-darwin/bin:$PATH"
+jam version
+```
+
+The macOS compilers need macOS 15 or newer, and the Linux ones glibc 2.35 or newer
+(Ubuntu 22.04, Debian 12). The release page also has a `SHA256SUMS` file to check a
+download against.
+
+## Homebrew <span class="badge">macOS</span>
+{: #homebrew}
+
+The formula builds the release from source and pulls in LLVM 22, LLD 22 and Rust for
+you. Add `--HEAD` to build the latest commit on `main` instead.
 
 ```bash
 brew tap tri-berry/jam https://github.com/tri-berry/jam
-brew install --HEAD jam
+brew install jam
 ```
 
 ## From source <span class="badge">Rust + LLVM 22</span>

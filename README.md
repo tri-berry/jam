@@ -11,15 +11,15 @@
   </p>
 </p>
 
-There's nothing available to use yet, and I've also disabled issues and pull requests on the repo. I'll re-enable both after the v0.1 release and once there's a proper documentation website. If there's anything you'd like to ask directly, feel free to send me an email.
+Jam is at an early [v0.0.1](https://github.com/tri-berry/jam/releases/tag/v0.0.1) release, and I've disabled issues and pull requests on the repo. I'll re-enable both after the v0.1 release and once there's a proper documentation website. If there's anything you'd like to ask directly, feel free to send me an email.
 
 Jam will move to an org in the future, but right now it's mostly me maintaining the language and I'm considering testing other options besides GitHub, so I'd like to wait a bit before starting to move things around.
 
-In case you want to test before v0.1:
+In case you want to test before v0.1, download a prebuilt compiler for macOS or Linux from the [release page](https://github.com/tri-berry/jam/releases/tag/v0.0.1) (see [Installation](https://jamlang.org/installation/)), or use Homebrew:
 
 ```bash
 brew tap tri-berry/jam https://github.com/tri-berry/jam
-brew install --HEAD jam
+brew install jam
 ```
 
 ## Building from source

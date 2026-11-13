@@ -1,16 +1,18 @@
 # Homebrew formula for the Jam compiler.
 #
-# Installation (HEAD-only until the first tagged release):
+# Installation:
 #
 #   brew tap tri-berry/jam https://github.com/tri-berry/jam
-#   brew install --HEAD jam
+#   brew install jam          # the latest release, built from source
+#   brew install --HEAD jam   # the latest commit on main
 #
-# Once a release is cut, add a `stable do ... end` block with the
-# tarball URL + sha256, and users can drop `--HEAD`.
+# On a new release, update `url` and `sha256` to the tag's source tarball.
 
 class Jam < Formula
-  desc "Jam programming language"
-  homepage "https://github.com/tri-berry/jam"
+  desc "Systems programming language with mutable value semantics"
+  homepage "https://jamlang.org"
+  url "https://github.com/tri-berry/jam/archive/refs/tags/v0.0.1.tar.gz"
+  sha256 "486362b29acfcfbb9f50e1c54e7c3d99d8e01eaa2ea0cdaef60cd8c8cba184a8"
   license "Apache-2.0" => { with: "LLVM-exception" }
   head "https://github.com/tri-berry/jam.git", branch: "main"
 
@@ -24,7 +26,7 @@ class Jam < Formula
     # PATH / Homebrew fallbacks) and links the monolithic libLLVM.
     ENV["LLVM_CONFIG"] = (llvm.opt_bin/"llvm-config").to_s
     # jam links programs with the LLD it embeds.
-    ENV["JAM_LLD_PREFIX"] = Formula["lld@22"].opt_prefix.to_s
+    ENV["JAM_LLD_PREFIX"] = formula_opt_prefix("lld@22").to_s
 
     system "cargo", "install", *std_cargo_args(path: "crates/jam")
 

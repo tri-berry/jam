@@ -80,9 +80,9 @@ generates. Jam is distributed under the Apache License 2.0 with LLVM Exceptions.
 
 ## Status
 
-Jam has no tagged release yet. Syntax and the standard library will keep changing until
-v0.1, and issues and pull requests on the repository stay closed until then. You can
-still build the compiler from `main` today.
+Jam is at v{{ site.version }}, an early release with prebuilt compilers for macOS and
+Linux. Syntax and the standard library will keep changing until v0.1, and issues and
+pull requests on the repository stay closed until then.
 
 Next, see [Installation]({{ '/installation/' | relative_url }}), then read the
 [Language Reference]({{ '/reference/' | relative_url }}).
