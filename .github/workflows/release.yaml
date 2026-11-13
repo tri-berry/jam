@@ -1,0 +1,225 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04, os: linux }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm, os: linux }
+          - { target: aarch64-apple-darwin, runner: macos-15, os: macos }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, os: macos }
+    env:
+      JAM_LLVM_LINK_SHARED: "0"
+      LLVM_VERSION: "22.1.8"
+      LLVM_SRC_SHA256: 922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="$GITHUB_REF_NAME"
+            if ! grep -q "^version = \"${version#v}\"" Cargo.toml; then
+              echo "::error::tag $version does not match the version in Cargo.toml"
+              exit 1
+            fi
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "ARCHIVE=jam-$version-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 22 (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          codename=$(lsb_release -cs)
+          echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev liblld-22-dev clang-22 \
+            zlib1g-dev libzstd-dev libxml2-dev
+          echo "LLVM_CONFIG=/usr/lib/llvm-22/bin/llvm-config" >> "$GITHUB_ENV"
+          /usr/lib/llvm-22/bin/llvm-config --version
+
+      - name: Install LLVM 22 (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          brew install llvm@22 zstd cmake ninja
+          LLVM_PREFIX="$(brew --prefix llvm@22)"
+          {
+            echo "LLVM_PREFIX=${LLVM_PREFIX}"
+            echo "LLVM_CONFIG=${LLVM_PREFIX}/bin/llvm-config"
+            echo "JAM_LLD_PREFIX=${PWD}/lld-static"
+            echo "JAM_LLVM_STATIC_SYSLIBS=zstd"
+            echo "RUSTFLAGS=-L native=$(brew --prefix zstd)/lib -C link-arg=-Wl,-dead_strip_dylibs"
+          } >> "$GITHUB_ENV"
+          installed=$("${LLVM_PREFIX}/bin/llvm-config" --version)
+          if [[ "$installed" != "$LLVM_VERSION" ]]; then
+            echo "::error::Homebrew llvm@22 is $installed but LLVM_VERSION is $LLVM_VERSION; update LLVM_VERSION and LLVM_SRC_SHA256"
+            exit 1
+          fi
+
+      - name: Cache static LLD (macOS)
+        if: matrix.os == 'macos'
+        id: lld-cache
+        uses: actions/cache@v6
+        with:
+          path: lld-static
+          key: lld-static-${{ env.LLVM_VERSION }}-${{ matrix.target }}
+
+      - name: Build static LLD (macOS)
+        if: matrix.os == 'macos' && steps.lld-cache.outputs.cache-hit != 'true'
+        run: |
+          src="llvm-project-${LLVM_VERSION}.src"
+          curl -fsSL -o llvm-src.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${src}.tar.xz"
+          echo "${LLVM_SRC_SHA256}  llvm-src.tar.xz" | shasum -a 256 --check
+          mkdir llvm-src
+          tar -xJf llvm-src.tar.xz -C llvm-src --strip-components=1
+          cmake -S llvm-src/lld -B llvm-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLD_BUILT_STANDALONE=ON \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_PREFIX_PATH="$LLVM_PREFIX"
+          cmake --build llvm-src/build --target lldMachO lldELF lldCommon
+          mkdir -p lld-static/lib lld-static/include
+          cp llvm-src/build/lib/liblldMachO.a llvm-src/build/lib/liblldELF.a \
+            llvm-src/build/lib/liblldCommon.a lld-static/lib/
+          cp -R llvm-src/lld/include/lld lld-static/include/
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install
+          rustup show
+
+      - name: Build
+        run: cargo build --release --locked -p jam
+
+      - name: Check dynamic dependencies
+        run: |
+          bin=target/release/jam
+          if [[ "${{ matrix.os }}" == "macos" ]]; then
+            otool -L "$bin"
+            bad=$(otool -L "$bin" | tail -n +2 | awk '{print $1}' \
+              | grep -vE '^(/usr/lib/|/System/)' || true)
+          else
+            ldd "$bin"
+            bad=$(ldd "$bin" | awk '{print $1}' \
+              | grep -vE '^(linux-vdso\.|/lib.*/ld-linux|(libc|libm|libdl|libpthread|librt|libgcc_s|libstdc\+\+|libz|libzstd)\.so)' || true)
+          fi
+          if [[ -n "$bad" ]]; then
+            echo "::error::release binary links libraries users may not have: $bad"
+            exit 1
+          fi
+
+      - name: Assemble archive
+        run: |
+          mkdir -p "$ARCHIVE/bin" "$ARCHIVE/lib/jam"
+          cp target/release/jam "$ARCHIVE/bin/jam"
+          strip "$ARCHIVE/bin/jam"
+          cp -R std "$ARCHIVE/lib/jam/std"
+          cp -R libc "$ARCHIVE/lib/jam/libc"
+          cp LICENSE README.md "$ARCHIVE/"
+
+      - name: Smoke test
+        run: |
+          jam="$PWD/$ARCHIVE/bin/jam"
+          "$jam" version
+          work="$RUNNER_TEMP/smoke"
+          mkdir -p "$work"
+          cd "$work"
+          cat > hello.jam <<'JAM'
+          const std = import("std");
+
+          fn main() {
+              std.fmt.println("Hello, World!");
+          }
+          JAM
+          env -i PATH=/nonexistent HOME="$HOME" "$jam" hello.jam
+          file output
+          if [[ "${{ matrix.os }}" == "linux" ]]; then
+            file output | grep -q "statically linked"
+          fi
+          out=$(./output || true)
+          echo "$out"
+          grep -q "Hello, World!" <<< "$out"
+
+      - name: Create tarball
+        run: |
+          tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          cat "$ARCHIVE.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}.tar.gz
+            ${{ env.ARCHIVE }}.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          cat jam-*.tar.gz.sha256 > SHA256SUMS
+          cat SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: jam-*.tar.gz
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          assets=(jam-*.tar.gz jam-*.tar.gz.sha256 SHA256SUMS)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            flags=()
+            if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$TAG" "${assets[@]}" \
+              --verify-tag --title "Jam $TAG" --generate-notes "${flags[@]}"
+          fi
