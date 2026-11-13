@@ -23,6 +23,10 @@ output/
 build/
 misc/
 
+# The prebuilt musl objects jam links Linux programs against are tracked.
+!libc/musl/**/*.o
+!libc/musl/**/*.a
+
 # Docs (jekyll)
 docs/_site/
 docs/.sass-cache/
