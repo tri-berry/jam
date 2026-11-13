@@ -59,10 +59,11 @@ jobs:
           echo "deb http://apt.llvm.org/${codename}/ llvm-toolchain-${codename}-22 main" \
             | sudo tee /etc/apt/sources.list.d/llvm.list
           sudo apt-get update
-          sudo apt-get install -y llvm-22-dev liblld-22-dev clang-22 \
+          sudo apt-get install -y llvm-22-dev liblld-22-dev libpolly-22-dev clang-22 \
             zlib1g-dev libzstd-dev libxml2-dev
           echo "LLVM_CONFIG=/usr/lib/llvm-22/bin/llvm-config" >> "$GITHUB_ENV"
           /usr/lib/llvm-22/bin/llvm-config --version
+          /usr/lib/llvm-22/bin/llvm-config --link-static --system-libs
 
       - name: Install LLVM 22 (macOS)
         if: matrix.os == 'macos'
