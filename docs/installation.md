@@ -34,8 +34,9 @@ brew install --HEAD jam
 ## From source <span class="badge">Rust + LLVM 22</span>
 
 The compiler is written in Rust. You need the toolchain from `rust-toolchain.toml`
-(picked up automatically by `rustup`) and LLVM 22, either `brew install llvm` or
-`LLVM_CONFIG` pointing at your `llvm-config`.
+(picked up automatically by `rustup`) plus LLVM 22 and LLD 22, either
+`brew install llvm@22 lld@22` or `LLVM_CONFIG` pointing at your `llvm-config` and
+`JAM_LLD_PREFIX` at your LLD install.
 
 ```bash
 git clone https://github.com/tri-berry/jam
@@ -62,5 +63,31 @@ jam run hello.jam
 The installed `jam` finds the standard library relative to its own binary
 (`<prefix>/lib/jam/std`). Set `JAM_STD_PATH` or pass `--std-path` to point it
 somewhere else.
+
+## Linking
+
+Jam links programs itself, with the LLD linker built into the compiler and the C
+library files it ships in `<prefix>/lib/jam/libc`. You do not need clang, gcc or the
+Xcode command-line tools to build a Jam program.
+
+- **macOS**: programs link against a bundled stub of the system library.
+- **Linux**: programs link statically against a bundled musl, so they run on any
+  distribution.
+
+Both sets of files ship with every install, so cross-compiling needs nothing extra:
+`jam -C target=x86_64-unknown-linux-musl hello.jam` on a Mac produces a Linux
+executable.
+
+Link other libraries with `-l<name>`, and add search directories with `-L<dir>`:
+
+- **macOS**: `-l` also searches the macOS SDK when the Xcode command-line tools are
+  installed, so `jam run -lncurses tetris.jam` works. Without an SDK only the `-L`
+  directories and `/usr/local/lib` are searched.
+- **Linux**: because programs are static, `-l` can only use static libraries
+  (`lib<name>.a`) from the `-L` directories.
+
+On macOS a program runs on the OS version it was built on and newer. Set
+`MACOSX_DEPLOYMENT_TARGET` (for example `12.0`) to target an older release.
+`JAM_LIBC_PATH` points Jam at a different copy of the bundled files.
 
 Next, read the [Language Reference]({{ '/reference/' | relative_url }}).

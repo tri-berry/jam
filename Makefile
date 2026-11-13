@@ -17,11 +17,13 @@ endif
 BINDIR ?= $(PREFIX)/bin
 LIBDIR ?= $(PREFIX)/lib
 STDDIR ?= $(LIBDIR)/jam/std
+LIBCDIR ?= $(LIBDIR)/jam/libc
 
 # The compiler is the Rust workspace; `jam --version` gets its git SHA
 # baked in by crates/jam/build.rs, so no flags are needed here. LLVM is
 # located by crates/jam-llvm/build.rs (LLVM_CONFIG / LLVM_SYS_221_PREFIX /
-# PATH / Homebrew, in that order).
+# PATH / Homebrew, in that order), and LLD (the linker jam embeds) through
+# JAM_LLD_PREFIX / the LLVM prefix / Homebrew.
 build:
 	cargo build -p jam
 
@@ -55,6 +57,9 @@ install: release
 	install -d $(STDDIR)
 	rm -rf $(STDDIR)
 	cp -R ./std $(STDDIR)
+	@echo "Installing bundled libc files to $(LIBCDIR)..."
+	rm -rf $(LIBCDIR)
+	cp -R ./libc $(LIBCDIR)
 
 uninstall:
 	@echo "Uninstalling Jam compiler..."

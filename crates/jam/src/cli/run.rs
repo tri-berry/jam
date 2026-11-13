@@ -18,6 +18,7 @@ use std::path::Path;
 use jam_llvm::{Lto, OptLevel};
 
 use crate::cli::emit::{self, EmitMode, Strip};
+use crate::cli::link;
 
 /// Parse a `-C opt-level=N` value to an [`OptLevel`]. Returns `None` for an
 /// unrecognized value.
@@ -153,6 +154,27 @@ pub fn driver(args: &[String], start: usize, mode_tokens: bool) -> i32 {
             i += 1;
             continue;
         }
+        // `-L <dir>` / `-L<dir>`: where `-l` libraries are searched. Kept in
+        // the environment, like `--std-path`, so test workers inherit it.
+        let lib_dir: Option<String> = if arg == "-L" && i + 1 < args.len() {
+            i += 1;
+            Some(args[i].clone())
+        } else if arg.len() > 2 && arg.starts_with("-L") {
+            Some(arg[2..].to_string())
+        } else {
+            None
+        };
+        if let Some(dir) = lib_dir {
+            let mut dirs = std::env::var(link::LIBRARY_PATH_ENV).unwrap_or_default();
+            if !dirs.is_empty() {
+                dirs.push(':');
+            }
+            dirs.push_str(&dir);
+            // Safe here: argument parsing runs before any thread is spawned.
+            unsafe { std::env::set_var(link::LIBRARY_PATH_ENV, &dirs) };
+            i += 1;
+            continue;
+        }
         // `--release` / `--release-small` were removed in favor of `-C opt-level`.
         if arg == "--release" {
             eprintln!("Error: `--release` was removed; use `-C opt-level=3` instead");
@@ -185,7 +207,7 @@ pub fn driver(args: &[String], start: usize, mode_tokens: bool) -> i32 {
         if run_flag {
             if arg.starts_with('-') {
                 eprintln!(
-                    "Error: `run` only accepts linker flags (-l<name>, -l <name>, --library <name>); got `{arg}`"
+                    "Error: `run` only accepts linker flags (-l<name>, -l <name>, --library <name>, -L<dir>); got `{arg}`"
                 );
                 return 1;
             }
@@ -535,7 +557,7 @@ fn worker_exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 /// The parallel worker pool: per-file work is ~98% blocked subprocess waits
-/// (clang link + first-exec assessment of the freshly linked test binary), so
+/// (the link + first-exec assessment of the freshly linked test binary), so
 /// a small pool of `jam test <file>` re-invocations gives near-linear speedup.
 /// Each worker's output prints as a coherent block on completion, in
 /// completion order.

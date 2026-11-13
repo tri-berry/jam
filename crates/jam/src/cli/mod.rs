@@ -6,6 +6,7 @@
  */
 
 pub mod emit;
+pub mod link;
 pub mod progress;
 pub mod run;
 
@@ -50,7 +51,8 @@ Options:
                   `import("std/...")`; takes precedence over the
                   JAM_STD_PATH env var.
   -l<name>, --library <name>
-                  Link against system library <name>
+                  Link against library <name>
+  -L<dir>         Add <dir> to the library search path for -l
 
 Examples:
 

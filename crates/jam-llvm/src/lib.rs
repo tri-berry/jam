@@ -32,7 +32,7 @@ pub use ll::{BasicBlock, Builder, Context, Function, Module, Type, Value};
 pub use target::{
     Lto, OptLevel, Strip, TargetMachine, append_to_used, default_target_triple, host_cpu_features,
     host_cpu_name, init_all_targets, init_native_asm_parser, init_native_asm_printer,
-    init_native_target, set_target_triple_override, target_triple_is_overridden,
+    init_native_target, lld_link, set_target_triple_override, target_triple_is_overridden,
 };
 
 /// LLVM calling conventions jam emits.

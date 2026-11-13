@@ -47,7 +47,9 @@ fn structs_by_value_cross_the_c_boundary_both_ways() {
 
     let obj = dir.0.join("cfuncs.o");
     let cc = Command::new("cc")
-        .args(["-O1", "-c"])
+        // No fortified libc calls (`__printf_chk`): on Linux jam links
+        // against musl, which does not provide glibc's checked variants.
+        .args(["-O1", "-c", "-U_FORTIFY_SOURCE"])
         .arg(src.join("cfuncs.c"))
         .arg("-o")
         .arg(&obj)
@@ -67,15 +69,16 @@ fn structs_by_value_cross_the_c_boundary_both_ways() {
     assert!(ar.success(), "ar failed");
 
     let bin = dir.0.join("c_abi_bin");
-    // jam forwards `-l` only; LIBRARY_PATH points the linker at the archive.
+    // `-L` points jam's linker at the archive.
     let compile = Command::new(jam)
         .arg("build")
         .arg(src.join("main.jam"))
         .arg("-o")
         .arg(&bin)
+        .arg("-L")
+        .arg(&dir.0)
         .arg("-lcfuncs")
         .env("JAM_STD_PATH", format!("{repo}/std"))
-        .env("LIBRARY_PATH", &dir.0)
         .output()
         .expect("spawn jam");
     assert!(

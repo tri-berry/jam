@@ -23,12 +23,13 @@ use jam_sema::jir::{JirFunction, JirTag};
 use jam_sema::jir_codegen::{jir_declare_prototype, jir_define_body};
 use jam_sema::mangling::mangled_function_name;
 use jam_sema::module_resolver::ModuleResolver;
-use jam_sema::target::{Abi, Os, Target};
+use jam_sema::target::Target;
 use jam_syntax::ast::{FunctionAST, ModuleAST};
 use jam_syntax::ast_flat::{AstTag, BinOp, NodeStore, StringPool, TypeKind, TypePool, UnaryOp};
 use jam_syntax::parser::Parser;
 use jam_syntax::{Lexer, TokenType};
 
+use crate::cli::link::{LinkPlan, deployment_triple};
 use crate::cli::progress::ProgressGuard;
 
 /// Lex `path` and print the token stream. Returns a process exit code.
@@ -2835,7 +2836,7 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
 fn emit_object(cg: &CodegenContext, output: &str, opt: OptLevel, lto: Lto) -> Result<String, i32> {
     // Register both backends — the triple may be a `-C target` override.
     jam_llvm::init_all_targets();
-    let triple = default_target_triple();
+    let triple = deployment_triple(&default_target_triple());
     cg.module().set_target_triple(&triple);
     let host = Target::from_triple_str(&triple);
     let pic = host.requires_pie() || host.requires_pic();
@@ -2855,105 +2856,14 @@ fn emit_object(cg: &CodegenContext, output: &str, opt: OptLevel, lto: Lto) -> Re
     if !matches!(opt, OptLevel::None) {
         tm.run_optimization(cg.module());
     }
-    // LTO emits LLVM bitcode (.bc) instead of a native object; clang's LTO
-    // plugin re-runs the optimization at link time.
+    // LTO emits LLVM bitcode (.bc) instead of a native object; the linker
+    // re-runs the optimization at link time.
     let obj = format!("{output}.{}", if lto == Lto::Off { "o" } else { "bc" });
     if let Err(e) = tm.emit_to_file(cg.module(), &obj) {
         eprintln!("Failed to emit object file: {e}");
         return Err(1);
     }
     Ok(obj)
-}
-
-/// The link flags that follow `clang <obj> -o <out>` — libm, user `-l` libs,
-/// LTO, dead-strip, and `-C strip` plumbing. Shared between the normal link
-/// and the test-cache link (and FNV-mixed into the cache key).
-fn link_flags(
-    host: &Target,
-    libs: &[String],
-    opt: OptLevel,
-    lto: Lto,
-    strip: Strip,
-) -> Vec<String> {
-    let mut flags: Vec<String> = Vec::new();
-    // libm: `frem` on floats lowers to a `fmod` libcall. glibc keeps math in
-    // libm.so (pass `-lm`); macOS/Windows/musl bundle it into libc.
-    if matches!(host.os, Os::Linux | Os::FreeBsd) && host.abi != Abi::Musl {
-        flags.push("-lm".to_string());
-    }
-    // User-requested `-l<name>` libraries pass through to the link step
-    // (e.g. `jam run -lncurses tetris.jam`).
-    for lib in libs {
-        flags.push(format!("-l{lib}"));
-    }
-    // Hand the bitcode to clang's LTO driver so it selects the right linker
-    // plugin.
-    match lto {
-        Lto::Thin => flags.push("-flto=thin".to_string()),
-        Lto::Fat => flags.push("-flto=full".to_string()),
-        Lto::Off => {}
-    }
-    // Strip unreferenced functions/data at link time.
-    // Pairs with FunctionSections/DataSections on the TargetMachine, which
-    // split each symbol into its own section so the linker can GC them
-    // individually. Mach-O uses -dead_strip; ELF (Linux/FreeBSD) uses
-    // --gc-sections. Skipped in debug to keep link fast.
-    if !matches!(opt, OptLevel::None) {
-        match host.os {
-            Os::MacOs => flags.push("-Wl,-dead_strip".to_string()),
-            Os::Linux | Os::FreeBsd => flags.push("-Wl,--gc-sections".to_string()),
-            // PE/COFF link.exe uses /OPT:REF; the safer minimum is to not
-            // pass anything from here.
-            _ => {}
-        }
-    }
-    // `-C strip`: drop debug info / local symbols via linker flags. Mach-O:
-    // `-Wl,-S` strips DWARF, `-Wl,-x` removes local symbols; ELF:
-    // `--strip-debug` for debug only, `-s` for everything.
-    if strip != Strip::None {
-        match host.os {
-            Os::MacOs => {
-                flags.push("-Wl,-S".to_string());
-                if strip == Strip::Symbols {
-                    flags.push("-Wl,-x".to_string());
-                }
-            }
-            Os::Linux | Os::FreeBsd => {
-                flags.push(
-                    if strip == Strip::Symbols {
-                        "-Wl,-s"
-                    } else {
-                        "-Wl,--strip-debug"
-                    }
-                    .to_string(),
-                );
-            }
-            _ => {}
-        }
-    }
-    flags
-}
-
-/// `clang <obj> -o <out> <flags..>`. Does NOT remove the object. On any
-/// failure — nonzero clang exit or a failed spawn — prints `Linking failed`
-/// and returns 1.
-fn run_clang_link(obj: &str, out: &str, flags: &[String]) -> i32 {
-    let mut cmd = std::process::Command::new("clang");
-    // Cross builds: hand clang the same triple the object was emitted for.
-    if jam_llvm::target_triple_is_overridden() {
-        cmd.arg(format!("--target={}", default_target_triple()));
-    }
-    cmd.arg(obj).arg("-o").arg(out);
-    for f in flags {
-        cmd.arg(f);
-    }
-    match cmd.status() {
-        Ok(s) if s.success() => 0,
-        _ => {
-            eprintln!("Linking failed");
-            1
-        }
-    }
 }
 
 fn link_binary(
@@ -2968,9 +2878,14 @@ fn link_binary(
         Ok(o) => o,
         Err(rc) => return rc,
     };
-    let host = Target::from_triple_str(&default_target_triple());
-    let flags = link_flags(&host, libs, opt, lto, strip);
-    let rc = run_clang_link(&obj, output, &flags);
+    let plan = LinkPlan::new(
+        &deployment_triple(&default_target_triple()),
+        libs,
+        opt,
+        lto,
+        strip,
+    );
+    let rc = plan.link(&obj, output);
     if rc != 0 {
         // On link failure the intermediate object is deliberately left in cwd.
         return rc;
@@ -3019,20 +2934,23 @@ fn link_and_run_test(
         Ok(o) => o,
         Err(rc) => return rc,
     };
-    let host = Target::from_triple_str(&default_target_triple());
-    let flags = link_flags(&host, libs, opt, lto, strip);
+    let plan = LinkPlan::new(
+        &deployment_triple(&default_target_triple()),
+        libs,
+        opt,
+        lto,
+        strip,
+    );
 
     if let Some(mut h) = hash_file_fnv(&obj) {
-        for f in &flags {
+        for f in plan.key() {
             hash_mix_string(&mut h, f);
         }
         let cache_dir = std::path::Path::new("output").join("testcache");
         let _ = std::fs::create_dir_all(&cache_dir);
         let cache_path = cache_dir.join(format!("t{h:016x}"));
         let cache_path = cache_path.to_string_lossy().into_owned();
-        if !std::path::Path::new(&cache_path).exists()
-            && run_clang_link(&obj, &cache_path, &flags) != 0
-        {
+        if !std::path::Path::new(&cache_path).exists() && plan.link(&obj, &cache_path) != 0 {
             // The cache path DOES clean up on failure, unlike the ordinary
             // link's leave-the-object-behind early return.
             let _ = std::fs::remove_file(&obj);
@@ -3043,7 +2961,7 @@ fn link_and_run_test(
         return run_binary_at(&cache_path, false);
     }
 
-    let rc = run_clang_link(&obj, output, &flags);
+    let rc = plan.link(&obj, output);
     if rc != 0 {
         // Same as the ordinary link failure: intermediate left in cwd.
         return rc;

@@ -24,7 +24,7 @@ brew install --HEAD jam
 
 ## Building from source
 
-The compiler is written in Rust (it started as C++; the last commit carrying that implementation is [`4e66bc6`](https://github.com/tri-berry/jam/tree/4e66bc6)). You need the Rust toolchain (1.96, picked up automatically via `rust-toolchain.toml`) and LLVM 22 — `brew install llvm`, or point `LLVM_CONFIG` at your `llvm-config`.
+The compiler is written in Rust (it started as C++; the last commit carrying that implementation is [`4e66bc6`](https://github.com/tri-berry/jam/tree/4e66bc6)). You need the Rust toolchain (picked up automatically via `rust-toolchain.toml`) plus LLVM 22 and LLD 22 — `brew install llvm@22 lld@22`, or point `LLVM_CONFIG` at your `llvm-config` and `JAM_LLD_PREFIX` at your LLD install.
 
 ```bash
 make build     # debug build (cargo build -p jam)

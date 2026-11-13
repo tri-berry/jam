@@ -788,3 +788,9 @@ unsafe extern "C" {
         lto: c_int,
     );
 }
+
+// The embedded linker — `shim/jam_lld.cpp`. argv[0] picks the LLD driver
+// ("ld64.lld" = Mach-O, "ld.lld" = ELF); returns the linker's exit code.
+unsafe extern "C" {
+    pub fn jam_lld_link(argc: c_int, argv: *const *const c_char) -> c_int;
+}

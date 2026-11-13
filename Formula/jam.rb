@@ -15,6 +15,7 @@ class Jam < Formula
   head "https://github.com/tri-berry/jam.git", branch: "main"
 
   depends_on "rust" => :build
+  depends_on "lld@22"
   depends_on "llvm@22"
 
   def install
@@ -22,10 +23,15 @@ class Jam < Formula
     # crates/jam-llvm/build.rs locates LLVM through this (before the
     # PATH / Homebrew fallbacks) and links the monolithic libLLVM.
     ENV["LLVM_CONFIG"] = (llvm.opt_bin/"llvm-config").to_s
+    # jam links programs with the LLD it embeds.
+    ENV["JAM_LLD_PREFIX"] = Formula["lld@22"].opt_prefix.to_s
 
     system "cargo", "install", *std_cargo_args(path: "crates/jam")
 
     (lib/"jam").install "std" unless (lib/"jam/std").exist?
+    # The system-library stub programs link against, so no Xcode tools
+    # are needed to build a jam program.
+    (lib/"jam").install "libc" unless (lib/"jam/libc").exist?
   end
 
   test do
