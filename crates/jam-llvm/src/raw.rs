@@ -791,6 +791,7 @@ unsafe extern "C" {
 
 // The embedded linker — `shim/jam_lld.cpp`. argv[0] picks the LLD driver
 // ("ld64.lld" = Mach-O, "ld.lld" = ELF); returns the linker's exit code.
+// `quietMinVersion` drops Mach-O's "newer than target minimum" warnings.
 unsafe extern "C" {
-    pub fn jam_lld_link(argc: c_int, argv: *const *const c_char) -> c_int;
+    pub fn jam_lld_link(argc: c_int, argv: *const *const c_char, quietMinVersion: c_int) -> c_int;
 }

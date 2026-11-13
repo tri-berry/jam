@@ -21,7 +21,7 @@
 
 use std::path::{Path, PathBuf};
 
-use jam_llvm::{Lto, OptLevel, target_triple_is_overridden};
+use jam_llvm::{Lto, OptLevel, default_target_triple, target_triple_is_overridden};
 use jam_sema::target::{Arch, Os, Target};
 
 use crate::cli::emit::Strip;
@@ -51,9 +51,7 @@ pub fn deployment_triple(triple: &str) -> String {
     if host.os != Os::MacOs || macos_version_in(triple).is_some() {
         return triple.to_string();
     }
-    let from_env = std::env::var("MACOSX_DEPLOYMENT_TARGET")
-        .ok()
-        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()));
+    let from_env = deployment_target_env();
     let native = if target_triple_is_overridden() {
         None
     } else {
@@ -72,6 +70,22 @@ pub fn deployment_triple(triple: &str) -> String {
         }
     }
     parts.join("-")
+}
+
+/// Whether the user asked for a specific macOS deployment target (cases 1
+/// and 2 above). If not, jam chose it, and a library built for a newer OS is
+/// not a mismatch worth warning about: the linker's "newer than target
+/// minimum" warnings are silenced. Typical trigger: a library compiled on
+/// this machine targets its SDK version (27.2), a point release ahead of the
+/// OS version (27.0) jam targets by default.
+fn macos_target_is_explicit() -> bool {
+    macos_version_in(&default_target_triple()).is_some() || deployment_target_env().is_some()
+}
+
+fn deployment_target_env() -> Option<String> {
+    std::env::var("MACOSX_DEPLOYMENT_TARGET")
+        .ok()
+        .filter(|v| v.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// This machine's macOS version as `major.minor` (`kern.osproductversion`).
@@ -146,12 +160,14 @@ pub struct LinkPlan {
 
 enum Kind {
     /// In-process LLD: `<pre> -o <out> <before_obj> <obj> <after_obj>`.
-    /// `hint` is printed when the link fails.
+    /// `hint` is printed when the link fails. `quiet_min_version` silences
+    /// "newer than target minimum" warnings (see `macos_target_is_explicit`).
     Embedded {
         pre: Vec<String>,
         before_obj: Vec<String>,
         after_obj: Vec<String>,
         hint: Option<String>,
+        quiet_min_version: bool,
     },
     /// jam cannot link for this target; the message says why.
     Unavailable(String),
@@ -203,6 +219,7 @@ impl LinkPlan {
                 before_obj,
                 after_obj,
                 hint,
+                quiet_min_version,
             } => {
                 let mut args = pre.clone();
                 args.push("-o".to_string());
@@ -210,7 +227,7 @@ impl LinkPlan {
                 args.extend(before_obj.iter().cloned());
                 args.push(obj.to_string());
                 args.extend(after_obj.iter().cloned());
-                let ok = jam_llvm::lld_link(&args) == 0;
+                let ok = jam_llvm::lld_link(&args, *quiet_min_version) == 0;
                 if !ok && let Some(hint) = hint {
                     eprintln!("note: {hint}");
                 }
@@ -379,6 +396,7 @@ fn macho_plan(
         before_obj: Vec::new(),
         after_obj,
         hint,
+        quiet_min_version: !macos_target_is_explicit(),
     }
 }
 
@@ -454,6 +472,7 @@ fn elf_musl_plan(
         before_obj: vec![file("crt1.o"), file("crti.o")],
         after_obj,
         hint,
+        quiet_min_version: false,
     }
 }
 

@@ -386,8 +386,18 @@ pub fn append_to_used(module: &Module<'_>, func: Function<'_>) {
 /// Link in-process with the embedded LLD. `args` is a full linker command
 /// line whose first element names the driver: `ld64.lld` (Mach-O) or `ld.lld`
 /// (ELF). Returns the linker's exit code; diagnostics go to stderr.
-pub fn lld_link(args: &[String]) -> i32 {
+///
+/// `quiet_min_version` drops Mach-O's "has version X, which is newer than
+/// target minimum of Y" warnings; pass it when the deployment target was not
+/// something the user asked for.
+pub fn lld_link(args: &[String], quiet_min_version: bool) -> i32 {
     let owned: Vec<CString> = args.iter().map(|a| cstr(a)).collect();
     let argv: Vec<*const c_char> = owned.iter().map(|a| a.as_ptr()).collect();
-    unsafe { raw::jam_lld_link(argv.len() as c_int, argv.as_ptr()) }
+    unsafe {
+        raw::jam_lld_link(
+            argv.len() as c_int,
+            argv.as_ptr(),
+            quiet_min_version as c_int,
+        )
+    }
 }
