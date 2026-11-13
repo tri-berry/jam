@@ -42,7 +42,6 @@ version = "0.0.1"
 dependencies = [
  "cc",
  "float128",
- "jam_core",
 ]
 
 [[package]]

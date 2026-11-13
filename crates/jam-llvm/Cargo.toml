@@ -13,7 +13,6 @@ name = "jam_llvm"
 path = "src/lib.rs"
 
 [dependencies]
-jam_core = { path = "../jam-core" }
 float128 = { path = "../float128" }
 
 [build-dependencies]

@@ -188,12 +188,13 @@ impl<'a> DeclTable<'a> {
     /// Kind-filtered lookup (a fn and a type may share a name). Linear scan —
     /// `by_name` only tracks the first registration per name.
     pub fn find_by_name_and_kind(&self, name: &str, kind: DeclKind) -> DeclIndex {
-        for i in 1..self.decls.len() {
-            if self.decls[i].kind == kind && self.decls[i].name == name {
-                return DeclIndex::new(i as u32);
-            }
-        }
-        DeclIndex::NONE
+        // Index 0 is the `NONE` sentinel.
+        self.decls
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, d)| d.kind == kind && d.name == name)
+            .map_or(DeclIndex::NONE, |(i, _)| DeclIndex::new(i as u32))
     }
 
     /// Wire a symmetric `from -> to` dependency edge. Idempotent; self/sentinel

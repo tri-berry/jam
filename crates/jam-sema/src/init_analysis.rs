@@ -2477,7 +2477,7 @@ fn merge_maps(a: &NameMap, b: &NameMap) -> NameMap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codegen_context::{CodegenContext, EnumVariantInfo};
+    use crate::codegen_context::CodegenContext;
     use jam_llvm::Context;
     use jam_syntax::lexer::Lexer;
     use jam_syntax::parser::Parser;

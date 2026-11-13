@@ -5,6 +5,11 @@ authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+keywords.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
 description = "Jam programming language compiler"
 
 [[bin]]

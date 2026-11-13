@@ -7344,18 +7344,18 @@ fn astgen_match(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Result<
         let all_variant_pats = arms
             .iter()
             .all(|(pat, _)| pattern_variant_names(gctx, *pat, &mut covered, &mut pat_enum));
-        if let Some(en) = enum_name.clone().or(pat_enum) {
-            if all_variant_pats {
-                let variants = gctx.ctx.enum_variants_by_name(&en).unwrap_or_default();
-                if let Some(missing) = variants.iter().find(|v| !covered.contains(&v.name)) {
-                    return Err(format!(
-                        "astgen: match expression is not exhaustive — variant `{}` of `{en}` \
-                         is unhandled (cover it or add a `_` arm)",
-                        missing.name
-                    ));
-                }
-                proven = true;
+        if let Some(en) = enum_name.clone().or(pat_enum)
+            && all_variant_pats
+        {
+            let variants = gctx.ctx.enum_variants_by_name(&en).unwrap_or_default();
+            if let Some(missing) = variants.iter().find(|v| !covered.contains(&v.name)) {
+                return Err(format!(
+                    "astgen: match expression is not exhaustive — variant `{}` of `{en}` \
+                     is unhandled (cover it or add a `_` arm)",
+                    missing.name
+                ));
             }
+            proven = true;
         }
         if !proven {
             return Err(

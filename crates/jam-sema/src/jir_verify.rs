@@ -185,10 +185,7 @@ impl<'a> Verifier<'a> {
                     | TypeKind::PtrMany
             )
         };
-        if is_opaque(ka.kind) || is_opaque(kb.kind) {
-            return true;
-        }
-        false
+        is_opaque(ka.kind) || is_opaque(kb.kind)
     }
 
     fn check_inst(&mut self, r: JirRef) {
