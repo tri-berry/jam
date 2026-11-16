@@ -1,0 +1,12 @@
+// Helper module for test_match_call_arms.jam (not a test itself): the
+// call-valued arm lives in an IMPORTED module too, which is where the bug
+// was hardest to see (the parse error was reported as an import failure).
+pub fn triple(v: u32) u32 {
+    return match (v) {
+        0 { zero() }
+        _ { times(v, 3) }
+    };
+}
+
+fn zero() u32 { return 0; }
+fn times(a: u32, b: u32) u32 { return a * b; }

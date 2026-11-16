@@ -1,0 +1,162 @@
+// Regression: a `match` arm whose VALUE is (or starts with) a call.
+// `0 { pal(1, 2) }` used to fail with "Expected ';' after function call"
+// — the parser took every leading-identifier call for a call STATEMENT —
+// and the only spelling that worked was the parenthesized `0 { (pal(1, 2)) }`.
+// A call that is the last thing in an arm body is the arm's value.
+const { assert } = import("test");
+const helper = import("mod_match_call_arms");
+
+fn pal(a: u8, b: u8) u8 { return a + b; }
+fn absF(x: f64) f64 {
+    if (x < 0.0) { return 0.0 - x; }
+    return x;
+}
+fn twice(T: type, v: T) T { return v + v; }
+
+const Counter = struct {
+    n: u32,
+
+    fn get(self: Counter) u32 { return self.n; }
+    fn make(n: u32) Counter { return Counter { n: n }; }
+};
+
+// -------------------- Bare call as the arm value --------------------
+
+fn pick(i: u8) u8 {
+    return match (i) {
+        0 { pal(1, 2) }
+        1 { pal(pal(1, 1), pal(2, 2)) }
+        _ { 9 }
+    };
+}
+
+tfn bareCallArm()   { assert(pick(0), 3); }
+tfn nestedCallArm() { assert(pick(1), 6); }
+tfn literalArm()    { assert(pick(7), 9); }
+
+// The parenthesized workaround keeps working and means the same thing.
+fn pickParen(i: u8) u8 {
+    return match (i) {
+        0 { (pal(1, 2)) }
+        _ { 9 }
+    };
+}
+
+tfn parenthesizedCallArm() { assert(pickParen(0), pick(0)); }
+
+// -------------------- Value that STARTS with a call --------------------
+
+fn small(i: u8, x: f64) bool {
+    return match (i) {
+        0 { absF(x) < 1.0 }
+        1 { absF(x) < 1.0 && absF(x) > 0.25 }
+        _ { false }
+    };
+}
+
+fn arith(i: u8) u8 {
+    return match (i) {
+        0 { pal(1, 2) + 4 }
+        1 { pal(1, 2) * pal(2, 2) }
+        _ { 0 }
+    };
+}
+
+tfn callComparisonArm()     { assert(small(0, 0.0 - 0.5), true); }
+tfn callComparisonArmFalse(){ assert(small(0, 2.0), false); }
+tfn callLogicalArm()        { assert(small(1, 0.5), true); }
+tfn callLogicalArmFalse()   { assert(small(1, 0.125), false); }
+tfn callPlusArm()           { assert(arith(0), 7); }
+tfn callTimesCallArm()      { assert(arith(1), 12); }
+
+// A leading plain identifier followed by `&&` / `||` (same root cause: the
+// arm value stopped parsing at the logical operator).
+fn logic(i: u8, a: bool, b: bool) bool {
+    return match (i) {
+        0 { a && b }
+        1 { a || b }
+        _ { a || absF(0.5) < 1.0 && b }
+    };
+}
+
+tfn identAndArm()     { assert(logic(0, true, false), false); }
+tfn identOrArm()      { assert(logic(1, true, false), true); }
+tfn identOrCallArm()  { assert(logic(2, false, true), true); }
+
+// -------------------- Other call shapes --------------------
+
+fn shapes(i: u8) u32 {
+    const c: Counter = Counter { n: 41 };
+    return match (i) {
+        0 { c.get() }
+        1 { Counter.make(5).n }
+        2 { twice(u32, 21) }
+        3 { helper.triple(4) }
+        4 { @sizeOf(u32) as u32 }
+        _ { 0 }
+    };
+}
+
+tfn methodCallArm()     { assert(shapes(0), 41); }
+tfn typeMethodCallArm() { assert(shapes(1), 5); }
+tfn genericCallArm()    { assert(shapes(2), 42); }
+tfn moduleCallArm()     { assert(shapes(3), 12); }
+tfn atCallArm()         { assert(shapes(4), 4); }
+
+// -------------------- Statements before the value --------------------
+
+fn bump(p: *mut u32) { p.* = p.* + 1; }
+
+fn withStatements(i: u8) u32 {
+    var hits: u32 = 0;
+    const v: u8 = match (i) {
+        0 {
+            bump(&hits);
+            bump(&hits);
+            pal(10, 20)
+        }
+        _ { pal(0, 1) }
+    };
+    return hits * 100 + (v as u32);
+}
+
+tfn statementsThenCallValue() { assert(withStatements(0), 230); }
+tfn wildcardCallValue()       { assert(withStatements(3), 1); }
+
+// -------------------- Nested match, enum payloads --------------------
+
+const Op = enum { Nop, Add(u8, u8) };
+
+fn nested(op: Op, i: u8) u8 {
+    return match (op) {
+        Op.Nop { pal(0, 0) }
+        Op.Add(a, b) {
+            match (i) {
+                0 { pal(a, b) }
+                _ { pal(a, b) + 1 }
+            }
+        }
+    };
+}
+
+tfn nestedMatchCallArm()  { assert(nested(Op.Add(2, 3), 0), 5); }
+tfn nestedMatchCallPlus() { assert(nested(Op.Add(2, 3), 1), 6); }
+tfn payloadlessCallArm()  { assert(nested(Op.Nop, 0), 0); }
+
+// -------------------- Void arms: `;` optional on the last call --------------------
+
+fn dispatch(i: u8, p: *mut u32) {
+    match (i) {
+        0 { bump(p) }
+        1 { bump(p); }
+        _ { bump(p); bump(p) }
+    }
+}
+
+tfn voidCallArms() {
+    var n: u32 = 0;
+    dispatch(0, &n);
+    dispatch(1, &n);
+    dispatch(2, &n);
+    assert(n, 4);
+}

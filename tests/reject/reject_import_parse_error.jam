@@ -1,0 +1,11 @@
+// An imported module that fails to PARSE must be reported as that parse
+// error, blaming the imported file and line. It used to surface only as
+// "Cannot resolve import path: reject_import_parse_error_lib", with no
+// location — the file resolved fine, its contents were the problem.
+// expect-error: reject_import_parse_error_lib.jam:7: error: Expected ';' after return statement
+
+const lib = import("reject_import_parse_error_lib");
+
+fn main() u8 {
+    return lib.broken();
+}

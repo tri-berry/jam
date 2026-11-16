@@ -1,0 +1,7 @@
+// Helper module for reject_import_parse_error.jam (not a test itself):
+// the missing `;` reported at line 7 is the parse error the importer must report.
+pub fn fine() u8 { return 1; }
+
+pub fn broken() u8 {
+    return 2
+}

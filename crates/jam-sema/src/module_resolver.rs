@@ -40,6 +40,11 @@ pub struct ModuleResolver {
     /// std/std.jam) to its real identity (`std/fmt`) for namespace registration,
     /// instead of the raw spelling which never matches a loaded key.
     pub import_identities: std::collections::HashMap<(String, String), String>,
+    /// Rendered lex/parse errors (each newline-terminated) of modules that
+    /// resolved to a file but failed to load. The driver must report these
+    /// instead of the generic "cannot resolve" — the file was found, its
+    /// contents are the problem.
+    pub load_errors: Vec<String>,
 }
 
 impl ModuleResolver {
@@ -50,6 +55,7 @@ impl ModuleResolver {
             loaded_keys: HashSet::new(),
             loaded: Vec::new(),
             import_identities: std::collections::HashMap::new(),
+            load_errors: Vec::new(),
         }
     }
 
@@ -207,20 +213,25 @@ impl ModuleResolver {
                 Ok(s) => s,
                 Err(_) => continue,
             };
+            let path_str = resolved.to_string_lossy().into_owned();
             let mut lexer = Lexer::new(source);
-            if lexer.scan_tokens().is_err() {
+            if let Err(e) = lexer.scan_tokens() {
+                self.load_errors
+                    .push(format!("{path_str}:{}: error: {}\n", e.line, e.message));
                 continue;
             }
             let tokens = lexer.tokens().to_vec();
             let src_vec = lexer.source().to_vec();
             let mut diags = Diagnostics::new();
-            let path_str = resolved.to_string_lossy().into_owned();
             let mut module = {
                 let mut p = Parser::new(tokens, src_vec, tp, sp, ns, &mut diags, &path_str);
                 p.set_anon_base(anon_base);
                 match p.parse() {
                     Ok(m) => m,
-                    Err(_) => continue,
+                    Err(_) => {
+                        self.load_errors.push(diags.render_to_string());
+                        continue;
+                    }
                 }
             };
             anon_base += module.anon_structs.len() as u32;
@@ -485,6 +496,80 @@ mod tests {
         assert!(
             r.loaded.is_empty(),
             "`test` is a builtin and the other is unresolvable"
+        );
+        assert!(
+            r.load_errors.is_empty(),
+            "a missing file is not a load error"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lex_error_in_transitive_import_is_recorded() {
+        // entry -> good -> lexbad: the broken module is never named by the
+        // entry, but it is part of the program and must still be reported.
+        let dir = std::env::temp_dir().join(format!("jam_res_test4_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("good.jam"),
+            b"const b = import(\"lexbad\"); pub fn one() u32 { return 1; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lexbad.jam"),
+            b"pub fn ok() u32 { return 1; }\nconst s = \"unterminated;\n",
+        )
+        .unwrap();
+        let mut tp = TypePool::new();
+        let mut sp = StringPool::new();
+        let mut ns = NodeStore::new();
+        let entry = parse(
+            b"const g = import(\"good\"); fn f() u32 { return 0; }",
+            &mut tp,
+            &mut sp,
+            &mut ns,
+        );
+        let mut r = ModuleResolver::new(dir.to_str().unwrap());
+        r.load_all(&entry, &mut tp, &mut sp, &mut ns);
+        assert_eq!(r.loaded.len(), 1, "`good` itself loads");
+        assert_eq!(r.load_errors.len(), 1, "got: {:?}", r.load_errors);
+        assert!(
+            r.load_errors[0].contains("lexbad.jam:2: error:") && r.load_errors[0].ends_with('\n'),
+            "got: {:?}",
+            r.load_errors
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_error_in_import_is_recorded_with_file_and_line() {
+        let dir = std::env::temp_dir().join(format!("jam_res_test3_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("broken.jam"),
+            b"pub fn ok() u32 { return 1; }\npub fn bad() u32 { return 1 }\n",
+        )
+        .unwrap();
+        let mut tp = TypePool::new();
+        let mut sp = StringPool::new();
+        let mut ns = NodeStore::new();
+        let entry = parse(
+            b"const b = import(\"broken\"); fn f() u32 { return 0; }",
+            &mut tp,
+            &mut sp,
+            &mut ns,
+        );
+        let mut r = ModuleResolver::new(dir.to_str().unwrap());
+        r.load_all(&entry, &mut tp, &mut sp, &mut ns);
+        assert!(
+            r.loaded.is_empty(),
+            "a module that fails to parse is not loaded"
+        );
+        assert_eq!(r.load_errors.len(), 1, "got: {:?}", r.load_errors);
+        assert!(
+            r.load_errors[0].contains("broken.jam:2: error:"),
+            "got: {:?}",
+            r.load_errors
         );
         std::fs::remove_dir_all(&dir).ok();
     }

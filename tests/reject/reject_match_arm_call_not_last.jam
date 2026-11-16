@@ -1,0 +1,13 @@
+// A call is an arm's VALUE only when it is the last thing in the arm body.
+// Anywhere else it is a statement and still takes its `;`.
+// expect-error: reject_match_arm_call_not_last.jam:10: error: Expected ';' after function call
+
+fn one() u8 { return 1; }
+fn two() u8 { return 2; }
+
+fn main() u8 {
+    return match (0) {
+        0 { one() two() }
+        _ { 0 }
+    };
+}

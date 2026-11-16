@@ -7526,6 +7526,9 @@ fn astgen_match(gctx: &mut AstGenCtx, n: &AstNode, expected: TypeIdx) -> Result<
             let divergent = stmt_diverges(gctx, stmt);
             if is_tail && !peer.is_none() && !divergent {
                 let val = astgen_expr(gctx, stmt, peer)?;
+                // `0 { v() }` with `v` returning nothing has no value to give
+                // the match (storing it used to crash LLVM).
+                reject_void_call_value(gctx, val)?;
                 emit(
                     gctx,
                     JirInst {

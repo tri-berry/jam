@@ -1,0 +1,18 @@
+// A call that returns nothing can't be the VALUE of a match arm. With the
+// bare-call arm spelling (`0 { v() }`) this is easy to write; it used to
+// crash the compiler in LLVM instead of being diagnosed.
+// expect-error: the call returns nothing, so it has no value
+
+fn v() {}
+
+fn pick(i: u8) bool {
+    return match (i) {
+        0 { v() }
+        _ { false }
+    };
+}
+
+fn main() u8 {
+    if (pick(0)) { return 1; }
+    return 0;
+}

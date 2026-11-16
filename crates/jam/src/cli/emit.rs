@@ -1451,6 +1451,17 @@ pub fn emit_jir(path: &str, mode: EmitMode, opt: OptLevel, lto: Lto, strip: Stri
     let mut resolver = ModuleResolver::new(base_dir);
     resolver.load_all(&module, &mut type_pool, &mut string_pool, &mut node_store);
 
+    // An import that resolved to a file which then failed to lex/parse: report
+    // THAT error (file + line), not the "cannot resolve" the validation below
+    // would produce for the module that never loaded.
+    if !resolver.load_errors.is_empty() {
+        progress.error();
+        for e in &resolver.load_errors {
+            eprint!("{e}");
+        }
+        return 1;
+    }
+
     // Validate the entry module's imports: every import must resolve to a
     // loadable module, and every destructuring name must be EXPORTED. The
     // `--emit-tokens`/`--emit-ast` paths return earlier (separate functions),

@@ -56,6 +56,10 @@ pub struct Parser<'a> {
     #[allow(dead_code)]
     struct_context_stack: Vec<String>,
     import_handles: HashSet<String>,
+    /// True while parsing the statements directly inside a `match` arm body.
+    /// There a call followed by `}` is the arm's VALUE (`0 { f(x) }`), so it
+    /// takes no `;`. Nested statement blocks clear it.
+    in_arm_body: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -84,6 +88,7 @@ impl<'a> Parser<'a> {
             anon_enums: Vec::new(),
             struct_context_stack: Vec::new(),
             import_handles: HashSet::new(),
+            in_arm_body: false,
         }
     }
 
@@ -276,6 +281,21 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
 
+    /// Continue a logical expression whose first comparison is already parsed
+    /// (same folds as `parse_logical_or` / `parse_logical_and`).
+    fn parse_logical_tail(&mut self, first: NodeIdx) -> PResult<NodeIdx> {
+        let mut lhs = first;
+        while self.match_(TokenType::And) {
+            let rhs = self.parse_comparison()?;
+            lhs = self.emit_binop(BinOp::LogAnd, lhs, rhs);
+        }
+        while self.match_(TokenType::Or) {
+            let rhs = self.parse_logical_and()?;
+            lhs = self.emit_binop(BinOp::LogOr, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
     fn parse_logical_and(&mut self) -> PResult<NodeIdx> {
         let mut lhs = self.parse_comparison()?;
         while self.match_(TokenType::And) {
@@ -388,16 +408,30 @@ impl<'a> Parser<'a> {
     // ===================================================================
     // Statements. parse_expression is the STATEMENT entry, despite the name.
     // Entry-level subtleties are load-bearing: init/cond use parse_logical_or;
-    // for-bounds and assign-target use parse_comparison.
+    // for-bounds and assign-target use parse_comparison (a match-arm value may
+    // continue into `&&` / `||`).
     // ===================================================================
 
     /// Parse statements until `}` (not consumed) or EOF.
     fn parse_stmts_until_brace(&mut self) -> PResult<Vec<NodeIdx>> {
+        // A nested block is not an arm body: its calls are statements again.
+        let outer = std::mem::replace(&mut self.in_arm_body, false);
         let mut body = Vec::new();
         while !self.check(TokenType::CloseBrace) && !self.is_at_end() {
             body.push(self.parse_expression()?);
         }
+        self.in_arm_body = outer;
         Ok(body)
+    }
+
+    /// A call in statement position takes a `;` — unless it is the last thing
+    /// in a `match` arm body, where it is the arm's value.
+    fn consume_call_semi(&mut self, msg: &str) -> PResult<()> {
+        if self.in_arm_body && self.check(TokenType::CloseBrace) {
+            return Ok(());
+        }
+        self.consume(TokenType::Semi, msg)?;
+        Ok(())
     }
 
     /// `[thenCount, elseCount, then..., else...]` extra-pool block (If).
@@ -691,6 +725,17 @@ impl<'a> Parser<'a> {
         // Leading identifier: assignment, call-statement, or bare expr value.
         if self.check(TokenType::Identifier) {
             let target = self.parse_comparison()?;
+            // An arm VALUE may continue into `&&` / `||` (`a && b`,
+            // `f(x) < 1.0 || g(x)`). Only in an arm body: elsewhere the target
+            // stays a comparison, so statements and their errors are unchanged.
+            if self.in_arm_body && (self.check(TokenType::And) || self.check(TokenType::Or)) {
+                let value = self.parse_logical_tail(target)?;
+                // Only as the arm's value — not a discarded statement.
+                if !self.check(TokenType::CloseBrace) {
+                    return Err(self.parse_error("Expected `}` after match arm value"));
+                }
+                return Ok(value);
+            }
             if self.match_(TokenType::Equal) {
                 let value = self.parse_logical_or()?;
                 self.consume(TokenType::Semi, "Expected ';' after assignment")?;
@@ -707,7 +752,7 @@ impl<'a> Parser<'a> {
             // (e.g. a block's final expression) does not.
             let ttag = self.nodes.get(target).tag;
             if ttag == AstTag::Call || ttag == AstTag::TypeMethodCall {
-                self.consume(TokenType::Semi, "Expected ';' after function call")?;
+                self.consume_call_semi("Expected ';' after function call")?;
             }
             return Ok(target);
         }
@@ -716,7 +761,7 @@ impl<'a> Parser<'a> {
         // consume `;`.
         let expr = self.parse_logical_or()?;
         if self.nodes.get(expr).tag == AstTag::AtCall {
-            self.consume(TokenType::Semi, "Expected ';' after `@`-call statement")?;
+            self.consume_call_semi("Expected ';' after `@`-call statement")?;
         }
         Ok(expr)
     }
@@ -788,9 +833,11 @@ impl<'a> Parser<'a> {
             let pat = self.parse_pattern()?;
             self.consume(TokenType::OpenBrace, "Expected `{` to begin arm body")?;
             let mut body = Vec::new();
+            let outer = std::mem::replace(&mut self.in_arm_body, true);
             while !self.check(TokenType::CloseBrace) && !self.is_at_end() {
                 body.push(self.parse_expression()?);
             }
+            self.in_arm_body = outer;
             self.consume(TokenType::CloseBrace, "Expected `}` to close arm body")?;
             arms.push((pat, body));
         }
@@ -2271,10 +2318,9 @@ impl<'a> Parser<'a> {
             return Ok(f);
         }
         self.consume(TokenType::OpenBrace, "Expected '{' before function body")?;
-        let mut body = Vec::new();
-        while !self.check(TokenType::CloseBrace) && !self.is_at_end() {
-            body.push(self.parse_expression()?);
-        }
+        // (Also clears `in_arm_body`: a method of a struct declared inside a
+        // match arm is a statement block, not an arm body.)
+        let body = self.parse_stmts_until_brace()?;
         self.consume(TokenType::CloseBrace, "Expected '}' after function body")?;
         let mut f = FunctionAST::new(name, args, return_type, body);
         f.is_export = is_export;
@@ -2909,6 +2955,102 @@ mod tests {
             "pack-bearing cfn is an instantiation template"
         );
         assert_eq!(meth.args.len(), 1, "pack is not a Param");
+    }
+
+    /// Body statement nodes of the single arm of `match (x) { 0 { <body> } }`.
+    fn arm_body_tags(body: &str) -> Vec<AstTag> {
+        let (ns, root) = parse_expr(&format!("match (x) {{ 0 {{ {body} }} }}"));
+        let n = ns.get(root);
+        assert_eq!(n.tag, AstTag::MatchNode);
+        let e = n.rhs;
+        assert_eq!(ns.get_extra(ExtraIdx::new(e)), 1, "one arm");
+        let count = ns.get_extra(ExtraIdx::new(e + 2));
+        (0..count)
+            .map(|i| {
+                ns.get(NodeIdx::new(ns.get_extra(ExtraIdx::new(e + 3 + i))))
+                    .tag
+            })
+            .collect()
+    }
+
+    #[test]
+    fn arm_value_may_be_a_bare_call() {
+        assert_eq!(arm_body_tags("f(1, 2)"), [AstTag::Call]);
+        assert_eq!(arm_body_tags("@sizeOf(u8)"), [AstTag::AtCall]);
+        // Statement calls before the value still take their `;`.
+        assert_eq!(arm_body_tags("g(); f(1)"), [AstTag::Call, AstTag::Call]);
+        // And `;` after the last call stays legal (a void arm).
+        assert_eq!(arm_body_tags("f(1);"), [AstTag::Call]);
+    }
+
+    #[test]
+    fn arm_value_may_start_with_a_call() {
+        assert_eq!(arm_body_tags("f(x) < 1.0"), [AstTag::BinaryOp]);
+        assert_eq!(arm_body_tags("f(x) + g(x)"), [AstTag::BinaryOp]);
+        assert_eq!(
+            arm_body_tags("f(x) < 1.0 && g(x) > 0.5"),
+            [AstTag::BinaryOp]
+        );
+        assert_eq!(arm_body_tags("a || f(x)"), [AstTag::BinaryOp]);
+    }
+
+    #[test]
+    fn call_statement_still_needs_semicolon() {
+        // Not last in the arm.
+        let msgs = parse_module_err("fn h() u8 { return match (x) { 0 { f() g() } }; }");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
+        // A block nested in an arm is a statement block again.
+        let msgs = parse_module_err("fn h() { match (x) { 0 { if (c) { f() } } } }");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
+        // ...and so is everything after the match closes.
+        let msgs = parse_module_err("fn h() { match (x) { 0 { f() } } g() }");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
+        // A method body of a struct declared inside an arm.
+        let msgs = parse_module_err(
+            "fn h() { match (x) { 0 { const S = struct { v: u8, fn m(self: S) { f() } }; } } }",
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
+        // A `&&` / `||` value must END the arm; it is not a statement.
+        for body in ["a && b f()", "f() || g() x", "f() && g();"] {
+            let msgs = parse_module_err(&format!(
+                "fn h() bool {{ return match (x) {{ 0 {{ {body} }} }}; }}"
+            ));
+            assert!(
+                msgs.iter()
+                    .any(|m| m.contains("Expected `}` after match arm value")),
+                "{body}: got: {msgs:?}"
+            );
+        }
+        // `&&` / `||` after a call is only an arm-value continuation.
+        let msgs = parse_module_err("fn h() u8 { f() || g() return 0; }");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
+        // Plain function bodies are unchanged.
+        let msgs = parse_module_err("fn h() { f() }");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Expected ';' after function call")),
+            "got: {msgs:?}"
+        );
     }
 
     #[test]
